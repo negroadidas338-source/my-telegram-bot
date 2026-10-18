@@ -1,3 +1,4 @@
 aiogram>=3.0,<4
 groq
 python-dotenv
+aiohttp
