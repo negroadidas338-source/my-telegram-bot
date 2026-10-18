@@ -20,14 +20,15 @@ TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
+# Жесткая проверка: если ключей нет, сразу прерываемся с понятной ошибкой
 if not TOKEN:
-    print("Предупреждение: отсутствует BOT_TOKEN")
+    raise ValueError("Критическая ошибка: не задан BOT_TOKEN в переменных окружения!")
 if not GROQ_API_KEY:
-    print("Предупреждение: отсутствует GROQ_API_KEY")
+    raise ValueError("Критическая ошибка: не задан GROQ_API_KEY в переменных окружения!")
 
-bot = Bot(token=TOKEN) if TOKEN else None
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
-ai = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+ai = AsyncGroq(api_key=GROQ_API_KEY)
 
 groq_cooldown_until = 0.0
 
@@ -121,7 +122,6 @@ async def handle_all_messages(message: types.Message):
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    # В личке игнорируем других ботов, в группах — разрешаем всем
     if message.from_user and message.from_user.is_bot and not is_group:
         return
 
@@ -142,7 +142,6 @@ async def handle_all_messages(message: types.Message):
     memory.add_message(chat_id, "user", user_message)
     history = memory.get_history(chat_id)
 
-    # Безопасная фильтрация истории
     valid_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in history:
         if isinstance(msg, dict) and "role" in msg and "content" in msg:
@@ -206,10 +205,8 @@ async def handle_all_messages(message: types.Message):
 
 
 async def main():
-    # Запускаем веб-сервер в фоновом фоновом режиме через asyncio.create_task,
-    # чтобы он моментально отдавал порт Render и не мешал старту Telegram-бота
     asyncio.create_task(start_web_server())
-    
+
     print("Алиса запускается...")
     try:
         await dp.start_polling(bot)
@@ -227,3 +224,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nБот остановлен.")
         memory.shutdown()
+
