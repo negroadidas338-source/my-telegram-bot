@@ -1,13 +1,14 @@
 import asyncio
 import os
+import random
 import re
 import time
-from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatType
 from aiogram.exceptions import AiogramError
+from aiohttp import web
 from groq import AsyncGroq, APIConnectionError, APIStatusError
 
 from personality import SYSTEM_PROMPT
@@ -32,6 +33,30 @@ groq_cooldown_until = 0.0
 bot_username = None
 BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 
+# --- МИНИ-СЕРВЕР ДЛЯ RENDER (чтобы порт не падал по тайм-ауту) ---
+async def handle(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Веб-сервер для Render запущен на порту {port}")
+# -------------------------------------------------------------
+
+# Подборка классных гифок для «настроения» бота
+RANDOM_GIFS = [
+    "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+    "https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif",
+    "https://media.giphy.com/media/9Jvj4N96r2hO54s9O5/giphy.gif",
+    "https://media.giphy.com/media/26u6dTP6p4y0iyBIQ/giphy.gif",
+    "https://media.giphy.com/media/3oKIPnAiaMCws8nOsE/giphy.gif"
+]
+
 
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
@@ -48,6 +73,7 @@ async def help_command(message: types.Message):
     await message.answer(
         "Вот что я умею:\n\n"
         "• Просто писать мне — я отвечу и буду помнить наш недавний разговор\n"
+        "• /gif — прислать случайную анимацию\n"
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
@@ -66,6 +92,15 @@ async def reset_command(message: types.Message):
     )
 
 
+@dp.message(Command("gif"))
+async def gif_command(message: types.Message):
+    chosen_gif = random.choice(RANDOM_GIFS)
+    await message.answer_animation(
+        animation=chosen_gif,
+        caption="Лови гифку по заказу! 😎"
+    )
+
+
 @dp.message()
 async def handle_all_messages(message: types.Message):
     global groq_cooldown_until
@@ -79,7 +114,9 @@ async def handle_all_messages(message: types.Message):
     if message.from_user and message.from_user.is_bot:
         return
 
-    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+
+    if is_group:
         replied_to_bot = bool(
             message.reply_to_message
             and message.reply_to_message.from_user
@@ -122,7 +159,7 @@ async def handle_all_messages(message: types.Message):
 
     chat_id = message.chat.id
 
-    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if is_group:
         name = (
             message.from_user.full_name
             if message.from_user
@@ -156,7 +193,17 @@ async def handle_all_messages(message: types.Message):
 
         answer = answer.strip()[:4000]
         memory.add_message(chat_id, "assistant", answer)
+
+        # Отправляем текстовый ответ от ИИ
         await message.answer(answer)
+
+        # С вероятностью 25% (в личных сообщениях) бот по настроению кидает гифку
+        if not is_group and random.random() < 0.25:
+            chosen_gif = random.choice(RANDOM_GIFS)
+            await message.answer_animation(
+                animation=chosen_gif,
+                caption="Кстати, настроение примерно такое 😏"
+            )
 
     except APIStatusError as error:
         if error.status_code == 429:
@@ -206,29 +253,13 @@ async def handle_all_messages(message: types.Message):
             pass
 
 
-async def health(request):
-    return web.Response(text="ok")
-
-
-async def start_web():
-    # Мини-сервер, чтобы Render видел открытый порт
-    app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
-    await site.start()
-    print("Веб-сервер для Render запущен.")
-    return runner
-
-
 async def main():
+    # Запускаем веб-сервер для Render в фоновом режиме
+    await start_web_server()
     print("Алиса запускается...")
-    runner = await start_web()
     try:
         await dp.start_polling(bot)
     finally:
-        await runner.cleanup()
         memory.shutdown()
         await bot.session.close()
         await ai.close()
