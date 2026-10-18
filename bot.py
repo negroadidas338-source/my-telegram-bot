@@ -18,7 +18,8 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# Используем официально поддерживаемую топовую модель Groq
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not TOKEN:
     print("Предупреждение: отсутствует BOT_TOKEN")
@@ -30,10 +31,8 @@ dp = Dispatcher()
 ai = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 groq_cooldown_until = 0.0
-bot_username = None
-BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 
-# --- МИНИ-СЕРВЕР ДЛЯ RENDER (чтобы порт не падал по тайм-ауту) ---
+# --- МИНИ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
     return web.Response(text="Bot is alive!")
 
@@ -46,7 +45,7 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Веб-сервер для Render запущен на порту {port}")
-# -------------------------------------------------------------
+# --------------------------------
 
 RANDOM_GIFS = [
     "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
@@ -86,7 +85,7 @@ async def help_command(message: types.Message):
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
-        "В группе участвую в битвах ботов без лишних тормозов!"
+        "В группе я участвую в битвах ботов и отвечаю на все сообщения!"
     )
 
 
@@ -123,12 +122,9 @@ async def handle_all_messages(message: types.Message):
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    # ВАЙБКОДИНГ ДЛЯ БИТВЫ: 
-    # Если это бот, игнорируем его В ЛИЧКЕ, но В ГРУППЕ разрешаем абсолютно всем ботам (включая @LissaAI_bot) общаться!
-    if message.from_user and message.from_user.is_bot:
-        if not is_group:
-            return
-        # В группе ботов не блокируем — даем Лизи развернуться на полную катушку
+    # Игнорируем сторонних ботов в ЛС, но в группе разрешаем отвечать ботам
+    if message.from_user and message.from_user.is_bot and not is_group:
+        return
 
     if time.monotonic() < groq_cooldown_until:
         return
@@ -139,11 +135,7 @@ async def handle_all_messages(message: types.Message):
         if message.from_user and message.from_user.is_bot:
             name = "Лиза (Конкурент)"
         else:
-            name = (
-                message.from_user.full_name
-                if message.from_user
-                else "Участник группы"
-            )
+            name = message.from_user.full_name if message.from_user else "Участник"
         user_message = f"{name}: {text}"
     else:
         user_message = text
@@ -151,13 +143,16 @@ async def handle_all_messages(message: types.Message):
     memory.add_message(chat_id, "user", user_message)
     history = memory.get_history(chat_id)
 
+    # Фильтруем историю на случай битых записей
+    valid_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in history:
+        if isinstance(msg, dict) and "role" in msg and "content" in msg:
+            valid_messages.append(msg)
+
     try:
         response = await ai.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                *history,
-            ],
+            messages=valid_messages,
             temperature=0.85,
             max_tokens=3000,
         )
@@ -183,9 +178,10 @@ async def handle_all_messages(message: types.Message):
                     caption="Кстати, настроение примерно такое 😏"
                 )
             except Exception as e:
-                print(f"Ошибка при отправке рандомной гифки: {e}")
+                print(f"Ошибка отправки гифки: {e}")
 
     except APIStatusError as error:
+        print(f"APIStatusError Groq: {error.status_code} - {error.message}")
         if error.status_code == 429:
             headers = getattr(getattr(error, "response", None), "headers", {}) or {}
             try:
@@ -193,63 +189,43 @@ async def handle_all_messages(message: types.Message):
             except (TypeError, ValueError):
                 retry_after = 60
             groq_cooldown_until = time.monotonic() + retry_after
-            print(f"Groq rate limit: пауза {retry_after} сек.")
-            try:
-                await message.answer(
-                    f"Сейчас у меня небольшая пауза (лимит запросов). "
-                    f"Подожди примерно {retry_after} секунд, и я снова буду на связи 💫"
-                )
-            except AiogramError:
-                pass
+            await message.answer(
+                f"Сейчас у меня небольшая пауза (лимит запросов). "
+                f"Подожди примерно {retry_after} секунд 💫"
+            )
             return
 
-        print(f"Ошибка Groq API ({error.status_code}): {type(error).__name__}")
-        try:
-            await message.answer(
-                "Что-то связь прервалась. Попробуй чуть позже, я никуда не денусь."
-            )
-        except AiogramError:
-            pass
+        await message.answer("Что-то с сетью ИИ. Попробуй чуть позже!")
 
-    except APIConnectionError:
-        print("Временная ошибка Groq API (connection)")
-        try:
-            await message.answer(
-                "Что-то связь прервалась. Попробуй чуть позже, я никуда не денусь."
-            )
-        except AiogramError:
-            pass
-
-    except AiogramError as error:
-        print(f"Временная ошибка Telegram: {type(error).__name__}")
+    except APIConnectionError as error:
+        print(f"ConnectionError Groq: {error}")
+        await message.answer("Ошибка связи с сервером ИИ. Попробуй снова.")
 
     except Exception as error:
-        print(f"Ошибка обработки сообщения: {type(error).__name__}: {error}")
-        try:
-            await message.answer(
-                "Что-то пошло не так. Попробуй ещё раз чуть позже, ладно?"
-            )
-        except AiogramError:
-            pass
+        print(f"Критическая ошибка: {type(error).__name__}: {error}")
+        await message.answer("Что-то пошло не так. Попробуй ещё раз чуть позже!")
 
 
 async def main():
     await start_web_server()
-    print("Алиса запускается...")
+    print("Алиса запущен и готов к работе...")
     try:
         await dp.start_polling(bot)
     finally:
         memory.shutdown()
-        await bot.session.close()
-        await ai.close()
+        if bot:
+            await bot.session.close()
+        if ai:
+            await ai.close()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nАлиса остановлена.")
+        print("\nБот остановлен.")
         memory.shutdown()
+
 
 
 
