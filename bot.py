@@ -86,7 +86,7 @@ async def help_command(message: types.Message):
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
-        "В группе я участвую в битвах ботов и отвечаю на всё!"
+        "В группе участвую в битвах ботов без лишних тормозов!"
     )
 
 
@@ -121,16 +121,14 @@ async def handle_all_messages(message: types.Message):
     if not text or text.startswith("/"):
         return
 
-    # Проверка на ботов: обычных ботов игнорируем, но ДАЕМ ЗЕЛЕНЫЙ СВЕТ для NeuroHamBot (Лизы)
-    if message.from_user and message.from_user.is_bot:
-        is_competitor = (
-            message.from_user.username 
-            and message.from_user.username.casefold() == "NeuroHamBot".casefold()
-        )
-        if not is_competitor:
-            return
-
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+
+    # ВАЙБКОДИНГ ДЛЯ БИТВЫ: 
+    # Если это бот, игнорируем его В ЛИЧКЕ, но В ГРУППЕ разрешаем абсолютно всем ботам (включая @LissaAI_bot) общаться!
+    if message.from_user and message.from_user.is_bot:
+        if not is_group:
+            return
+        # В группе ботов не блокируем — даем Лизи развернуться на полную катушку
 
     if time.monotonic() < groq_cooldown_until:
         return
@@ -138,7 +136,6 @@ async def handle_all_messages(message: types.Message):
     chat_id = message.chat.id
 
     if is_group:
-        # Если пишет бот-конкурент, подписываем его имя для контекста ИИ
         if message.from_user and message.from_user.is_bot:
             name = "Лиза (Конкурент)"
         else:
@@ -253,5 +250,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nАлиса остановлена.")
         memory.shutdown()
+
 
 
