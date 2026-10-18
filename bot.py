@@ -20,7 +20,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
-# Убираем жесткий SystemExit, просто предупреждаем в логах, если ключа нет
 if not TOKEN:
     print("Предупреждение: отсутствует BOT_TOKEN")
 if not GROQ_API_KEY:
@@ -49,7 +48,6 @@ async def start_web_server():
     print(f"Веб-сервер для Render запущен на порту {port}")
 # -------------------------------------------------------------
 
-# Большой и разнообразный список гифок для настоящего рандома
 RANDOM_GIFS = [
     "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
     "https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif",
@@ -88,7 +86,7 @@ async def help_command(message: types.Message):
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
-        "В группе я отвечаю на любые сообщения для жарких споров!"
+        "В группе я участвую в битвах ботов и отвечаю на всё!"
     )
 
 
@@ -123,12 +121,16 @@ async def handle_all_messages(message: types.Message):
     if not text or text.startswith("/"):
         return
 
+    # Проверка на ботов: обычных ботов игнорируем, но ДАЕМ ЗЕЛЕНЫЙ СВЕТ для NeuroHamBot (Лизы)
     if message.from_user and message.from_user.is_bot:
-        return
+        is_competitor = (
+            message.from_user.username 
+            and message.from_user.username.casefold() == "NeuroHamBot".casefold()
+        )
+        if not is_competitor:
+            return
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
-
-    # Убрали все ограничения для групп — теперь бот отвечает на всё подряд для битвы!
 
     if time.monotonic() < groq_cooldown_until:
         return
@@ -136,11 +138,15 @@ async def handle_all_messages(message: types.Message):
     chat_id = message.chat.id
 
     if is_group:
-        name = (
-            message.from_user.full_name
-            if message.from_user
-            else "Участник группы"
-        )
+        # Если пишет бот-конкурент, подписываем его имя для контекста ИИ
+        if message.from_user and message.from_user.is_bot:
+            name = "Лиза (Конкурент)"
+        else:
+            name = (
+                message.from_user.full_name
+                if message.from_user
+                else "Участник группы"
+            )
         user_message = f"{name}: {text}"
     else:
         user_message = text
@@ -156,7 +162,7 @@ async def handle_all_messages(message: types.Message):
                 *history,
             ],
             temperature=0.85,
-            max_tokens=3000,  # Выкрутили лимит до 3000 токенов для лонгридов
+            max_tokens=3000,
         )
         answer = response.choices[0].message.content
 
@@ -170,10 +176,8 @@ async def handle_all_messages(message: types.Message):
         answer = answer.strip()[:4000]
         memory.add_message(chat_id, "assistant", answer)
 
-        # Отправляем текстовый ответ от ИИ
         await message.answer(answer)
 
-        # С вероятностью 25% (в ЛС) бот кидает рандомную гифку
         if not is_group and random.random() < 0.25:
             try:
                 chosen_gif = random.choice(RANDOM_GIFS)
@@ -233,7 +237,6 @@ async def handle_all_messages(message: types.Message):
 
 
 async def main():
-    # Запускаем веб-сервер для Render в фоновом режиме
     await start_web_server()
     print("Алиса запускается...")
     try:
@@ -250,4 +253,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nАлиса остановлена.")
         memory.shutdown()
+
 
