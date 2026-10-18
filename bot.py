@@ -20,14 +20,15 @@ TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
+# Убираем жесткий SystemExit, просто предупреждаем в логах, если ключа нет
 if not TOKEN:
-    raise SystemExit("Ошибка: в .env отсутствует BOT_TOKEN")
+    print("Предупреждение: отсутствует BOT_TOKEN")
 if not GROQ_API_KEY:
-    raise SystemExit("Ошибка: в .env отсутствует GROQ_API_KEY")
+    print("Предупреждение: отсутствует GROQ_API_KEY")
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN) if TOKEN else None
 dp = Dispatcher()
-ai = AsyncGroq(api_key=GROQ_API_KEY)
+ai = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 groq_cooldown_until = 0.0
 bot_username = None
