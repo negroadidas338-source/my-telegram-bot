@@ -17,6 +17,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Актуальная и мощная модель Groq с поддержкой лонгридов
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not TOKEN:
@@ -32,7 +33,7 @@ groq_cooldown_until = 0.0
 bot_username = None
 BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 
-# Защита от дублирования сообщений (храним ID недавно обработанных)
+# Защита от дублирования сообщений
 processed_messages = set()
 
 
@@ -73,12 +74,11 @@ async def handle_all_messages(message: types.Message):
     global groq_cooldown_until
     global bot_username
 
-    # Защита от дублей: если этот message_id уже обрабатывали, сразу выходим
+    # Защита от дублей по ID сообщения
     msg_unique_key = (message.chat.id, message.message_id)
     if msg_unique_key in processed_messages:
         return
     processed_messages.add(msg_unique_key)
-    # Очищаем старые ID, чтобы память не раздувалась (держим последние 200)
     if len(processed_messages) > 200:
         processed_messages.pop()
 
@@ -92,6 +92,7 @@ async def handle_all_messages(message: types.Message):
     if message.from_user and message.from_user.is_bot and not is_group:
         return
 
+    # Разрешаем диалог с Лизой (@LissaAI_bot) в группах для битвы ботов
     is_rival_bot = bool(
         is_group 
         and message.from_user 
@@ -168,7 +169,7 @@ async def handle_all_messages(message: types.Message):
             model=GROQ_MODEL,
             messages=valid_messages,
             temperature=0.85,
-            max_tokens=3000,
+            max_tokens=3000,  # Лимит для лонгридов
         )
         answer = response.choices[0].message.content
 
