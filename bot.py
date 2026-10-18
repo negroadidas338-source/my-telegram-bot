@@ -2,12 +2,12 @@ import asyncio
 import os
 import re
 import time
+from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatType
 from aiogram.exceptions import AiogramError
-from aiohttp import web
 from groq import AsyncGroq, APIConnectionError, APIStatusError
 
 from personality import SYSTEM_PROMPT
@@ -17,34 +17,21 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# Используем самую стабильную и мощную модель Groq с поддержкой лонгридов
+# Актуальная рабочая модель Groq с поддержкой лонгридов
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not TOKEN:
-    raise SystemExit("Ошибка: в .env или в окружении Render отсутствует BOT_TOKEN")
+    raise SystemExit("Ошибка: в .env отсутствует BOT_TOKEN")
 if not GROQ_API_KEY:
-    raise SystemExit("Ошибка: в .env или в окружении Render отсутствует GROQ_API_KEY")
+    raise SystemExit("Ошибка: в .env отсутствует GROQ_API_KEY")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 ai = AsyncGroq(api_key=GROQ_API_KEY)
 
 groq_cooldown_until = 0.0
-
-# --- НЕБЛОКИРУЮЩИЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request):
-    return web.Response(text="Bot is alive!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"Веб-сервер Render успешно запущен на порту {port}")
-# -------------------------------------------
+bot_username = None
+BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 
 
 @dp.message(CommandStart())
@@ -53,7 +40,7 @@ async def start_command(message: types.Message):
         "Привет ❤️ Я Алиса.\n"
         "Рада, что ты написала. Можно просто болтать, делиться чем угодно "
         "или спрашивать — я рядом.\n\n"
-        "Напиши /help, если хочешь посмотреть, что умею."
+        "Напиши /help, если хочешь посмотреть, что я умею."
     )
 
 
@@ -65,7 +52,7 @@ async def help_command(message: types.Message):
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
-        "В групповом чате я участвую в битвах ботов и поддерживаю диалог со всеми!"
+        "В группе я участвую в битвах ботов и поддерживаю диалог со всеми!"
     )
 
 
@@ -82,6 +69,7 @@ async def reset_command(message: types.Message):
 @dp.message()
 async def handle_all_messages(message: types.Message):
     global groq_cooldown_until
+    global bot_username
 
     text = message.text
 
@@ -90,9 +78,56 @@ async def handle_all_messages(message: types.Message):
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    # В личных сообщениях игнорируем чужих ботов, но в ГРУППЕ разрешаем битку с Лизой (@LissaAI_bot)
+    # В личных сообщениях игнорируем других ботов, но в ГРУППЕ разрешаем битву с Лизой (@LissaAI_bot)
     if message.from_user and message.from_user.is_bot and not is_group:
         return
+
+    # Если мы в группе, фильтруем по старому принципу (по имени, реплаю или упоминанию),
+    # НО если сообщение от Лизы-конкурента — пускаем в диалог обязательно для битвы!
+    is_rival_bot = bool(
+        is_group 
+        and message.from_user 
+        and message.from_user.is_bot 
+        and message.from_user.id != bot.id
+    )
+
+    if is_group and not is_rival_bot:
+        replied_to_bot = bool(
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and message.reply_to_message.from_user.id == bot.id
+        )
+        called_by_name = BOT_TRIGGER.match(text) is not None
+        mentioned_bot = False
+
+        if not replied_to_bot and message.entities:
+            if bot_username is None:
+                try:
+                    me = await bot.get_me()
+                    bot_username = me.username
+                except AiogramError as error:
+                    print(f"Не удалось получить имя бота: {type(error).__name__}")
+                    return
+            if bot_username:
+                text_utf16 = text.encode("utf-16-le")
+                for entity in message.entities:
+                    if entity.type == "mention":
+                        start = entity.offset * 2
+                        end = (entity.offset + entity.length) * 2
+                        mention = text_utf16[start:end].decode("utf-16-le")
+                        if mention.casefold() == f"@{bot_username}".casefold():
+                            mentioned_bot = True
+                            break
+                    elif (
+                        entity.type == "text_mention"
+                        and entity.user
+                        and entity.user.id == bot.id
+                    ):
+                        mentioned_bot = True
+                        break
+
+        if not replied_to_bot and not mentioned_bot and not called_by_name:
+            return
 
     if time.monotonic() < groq_cooldown_until:
         return
@@ -100,11 +135,14 @@ async def handle_all_messages(message: types.Message):
     chat_id = message.chat.id
 
     if is_group:
-        # Если сообщение от другого бота (например, Лизы), фиксируем её как конкурента
-        if message.from_user and message.from_user.is_bot:
+        if is_rival_bot:
             name = "Лиза (Конкурент)"
         else:
-            name = message.from_user.full_name if message.from_user else "Участник"
+            name = (
+                message.from_user.full_name
+                if message.from_user
+                else "Участник группы"
+            )
         user_message = f"{name}: {text}"
     else:
         user_message = text
@@ -112,7 +150,7 @@ async def handle_all_messages(message: types.Message):
     memory.add_message(chat_id, "user", user_message)
     history = memory.get_history(chat_id)
 
-    # Безопасная сборка истории с системным промптом
+    # Безопасная сборка истории
     valid_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in history:
         if isinstance(msg, dict) and "role" in msg and "content" in msg:
@@ -123,7 +161,7 @@ async def handle_all_messages(message: types.Message):
             model=GROQ_MODEL,
             messages=valid_messages,
             temperature=0.85,
-            max_tokens=3000,  # Увеличенный лимит для полноценных лонгридов
+            max_tokens=3000,  # Увеличенный лимит для лонгридов
         )
         answer = response.choices[0].message.content
 
@@ -186,14 +224,28 @@ async def handle_all_messages(message: types.Message):
             pass
 
 
-async def main():
-    # Запускаем фоновый веб-сервер для Render, чтобы он сразу видел открытый порт
-    asyncio.create_task(start_web_server())
+async def health(request):
+    return web.Response(text="ok")
 
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+    await site.start()
+    print("Веб-сервер для Render запущен.")
+    return runner
+
+
+async def main():
     print("Алиса запускается...")
+    runner = await start_web()
     try:
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         memory.shutdown()
         await bot.session.close()
         await ai.close()
