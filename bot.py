@@ -49,13 +49,23 @@ async def start_web_server():
     print(f"Веб-сервер для Render запущен на порту {port}")
 # -------------------------------------------------------------
 
-# Подборка классных гифок для «настроения» бота
+# Большой и разнообразный список гифок для настоящего рандома
 RANDOM_GIFS = [
     "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
     "https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif",
     "https://media.giphy.com/media/9Jvj4N96r2hO54s9O5/giphy.gif",
     "https://media.giphy.com/media/26u6dTP6p4y0iyBIQ/giphy.gif",
-    "https://media.giphy.com/media/3oKIPnAiaMCws8nOsE/giphy.gif"
+    "https://media.giphy.com/media/3oKIPnAiaMCws8nOsE/giphy.gif",
+    "https://media.giphy.com/media/5vkWb96W158h2/giphy.gif",
+    "https://media.giphy.com/media/12NUbkX6p4xOO4/giphy.gif",
+    "https://media.giphy.com/media/xTiTnMhJTwNHCHdTZS/giphy.gif",
+    "https://media.giphy.com/media/13Hgw5hF0jWM92/giphy.gif",
+    "https://media.giphy.com/media/L95W4wv8nnb9K/giphy.gif",
+    "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif",
+    "https://media.giphy.com/media/8L0P9W5o0pFsY/giphy.gif",
+    "https://media.giphy.com/media/uWlpPGquhGZNFzY90z/giphy.gif",
+    "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+    "https://media.giphy.com/media/g9582DNuQppxC/giphy.gif"
 ]
 
 
@@ -78,8 +88,7 @@ async def help_command(message: types.Message):
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
-        "В группе я отвечаю, если меня позвать по имени «Алиса», "
-        "ответить на моё сообщение или упомянуть меня."
+        "В группе я отвечаю на любые сообщения для жарких споров!"
     )
 
 
@@ -96,16 +105,18 @@ async def reset_command(message: types.Message):
 @dp.message(Command("gif"))
 async def gif_command(message: types.Message):
     chosen_gif = random.choice(RANDOM_GIFS)
-    await message.answer_animation(
-        animation=chosen_gif,
-        caption="Лови гифку по заказу! 😎"
-    )
+    try:
+        await message.answer_animation(
+            animation=chosen_gif,
+            caption="Лови гифку по заказу! 😎"
+        )
+    except Exception as e:
+        print(f"Ошибка отправки гифки: {e}")
 
 
 @dp.message()
 async def handle_all_messages(message: types.Message):
     global groq_cooldown_until
-    global bot_username
 
     text = message.text
 
@@ -117,43 +128,7 @@ async def handle_all_messages(message: types.Message):
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    if is_group:
-        replied_to_bot = bool(
-            message.reply_to_message
-            and message.reply_to_message.from_user
-            and message.reply_to_message.from_user.id == bot.id
-        )
-        called_by_name = BOT_TRIGGER.match(text) is not None
-        mentioned_bot = False
-
-        if not replied_to_bot and message.entities:
-            if bot_username is None:
-                try:
-                    me = await bot.get_me()
-                    bot_username = me.username
-                except AiogramError as error:
-                    print(f"Не удалось получить имя бота: {type(error).__name__}")
-                    return
-            if bot_username:
-                text_utf16 = text.encode("utf-16-le")
-                for entity in message.entities:
-                    if entity.type == "mention":
-                        start = entity.offset * 2
-                        end = (entity.offset + entity.length) * 2
-                        mention = text_utf16[start:end].decode("utf-16-le")
-                        if mention.casefold() == f"@{bot_username}".casefold():
-                            mentioned_bot = True
-                            break
-                    elif (
-                        entity.type == "text_mention"
-                        and entity.user
-                        and entity.user.id == bot.id
-                    ):
-                        mentioned_bot = True
-                        break
-
-        if not replied_to_bot and not mentioned_bot and not called_by_name:
-            return
+    # Убрали все ограничения для групп — теперь бот отвечает на всё подряд для битвы!
 
     if time.monotonic() < groq_cooldown_until:
         return
@@ -181,7 +156,7 @@ async def handle_all_messages(message: types.Message):
                 *history,
             ],
             temperature=0.85,
-            max_tokens=500,
+            max_tokens=3000,  # Выкрутили лимит до 3000 токенов для лонгридов
         )
         answer = response.choices[0].message.content
 
@@ -198,13 +173,16 @@ async def handle_all_messages(message: types.Message):
         # Отправляем текстовый ответ от ИИ
         await message.answer(answer)
 
-        # С вероятностью 25% (в личных сообщениях) бот по настроению кидает гифку
+        # С вероятностью 25% (в ЛС) бот кидает рандомную гифку
         if not is_group and random.random() < 0.25:
-            chosen_gif = random.choice(RANDOM_GIFS)
-            await message.answer_animation(
-                animation=chosen_gif,
-                caption="Кстати, настроение примерно такое 😏"
-            )
+            try:
+                chosen_gif = random.choice(RANDOM_GIFS)
+                await message.answer_animation(
+                    animation=chosen_gif,
+                    caption="Кстати, настроение примерно такое 😏"
+                )
+            except Exception as e:
+                print(f"Ошибка при отправке рандомной гифки: {e}")
 
     except APIStatusError as error:
         if error.status_code == 429:
@@ -272,3 +250,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nАлиса остановлена.")
         memory.shutdown()
+
