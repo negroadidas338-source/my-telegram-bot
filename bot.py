@@ -1,9 +1,8 @@
-import os
-from aiohttp import web
 import asyncio
 import os
 import re
 import time
+from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
@@ -207,11 +206,29 @@ async def handle_all_messages(message: types.Message):
             pass
 
 
+async def health(request):
+    return web.Response(text="ok")
+
+
+async def start_web():
+    # Мини-сервер, чтобы Render видел открытый порт
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+    await site.start()
+    print("Веб-сервер для Render запущен.")
+    return runner
+
+
 async def main():
     print("Алиса запускается...")
+    runner = await start_web()
     try:
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         memory.shutdown()
         await bot.session.close()
         await ai.close()
