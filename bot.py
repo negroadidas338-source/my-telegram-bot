@@ -18,7 +18,6 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# Используем официально поддерживаемую топовую модель Groq
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not TOKEN:
@@ -32,7 +31,7 @@ ai = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 groq_cooldown_until = 0.0
 
-# --- МИНИ-СЕРВЕР ДЛЯ RENDER ---
+# --- НЕБЛОКИРУЮЩИЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
     return web.Response(text="Bot is alive!")
 
@@ -44,8 +43,8 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Веб-сервер для Render запущен на порту {port}")
-# --------------------------------
+    print(f"Веб-сервер Render успешно запущен на порту {port}")
+# -------------------------------------------
 
 RANDOM_GIFS = [
     "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
@@ -122,7 +121,7 @@ async def handle_all_messages(message: types.Message):
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    # Игнорируем сторонних ботов в ЛС, но в группе разрешаем отвечать ботам
+    # В личке игнорируем других ботов, в группах — разрешаем всем
     if message.from_user and message.from_user.is_bot and not is_group:
         return
 
@@ -143,7 +142,7 @@ async def handle_all_messages(message: types.Message):
     memory.add_message(chat_id, "user", user_message)
     history = memory.get_history(chat_id)
 
-    # Фильтруем историю на случай битых записей
+    # Безопасная фильтрация истории
     valid_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in history:
         if isinstance(msg, dict) and "role" in msg and "content" in msg:
@@ -181,7 +180,7 @@ async def handle_all_messages(message: types.Message):
                 print(f"Ошибка отправки гифки: {e}")
 
     except APIStatusError as error:
-        print(f"APIStatusError Groq: {error.status_code} - {error.message}")
+        print(f"Groq API Error: {error.status_code} - {error.message}")
         if error.status_code == 429:
             headers = getattr(getattr(error, "response", None), "headers", {}) or {}
             try:
@@ -195,20 +194,23 @@ async def handle_all_messages(message: types.Message):
             )
             return
 
-        await message.answer("Что-то с сетью ИИ. Попробуй чуть позже!")
+        await message.answer("Что-то связь прервалась. Попробуй чуть позже!")
 
     except APIConnectionError as error:
-        print(f"ConnectionError Groq: {error}")
-        await message.answer("Ошибка связи с сервером ИИ. Попробуй снова.")
+        print(f"Groq Connection Error: {error}")
+        await message.answer("Ошибка связи с сервером ИИ. Попробуй еще раз!")
 
     except Exception as error:
-        print(f"Критическая ошибка: {type(error).__name__}: {error}")
+        print(f"Ошибка при обработке сообщения: {type(error).__name__}: {error}")
         await message.answer("Что-то пошло не так. Попробуй ещё раз чуть позже!")
 
 
 async def main():
-    await start_web_server()
-    print("Алиса запущен и готов к работе...")
+    # Запускаем веб-сервер в фоновом фоновом режиме через asyncio.create_task,
+    # чтобы он моментально отдавал порт Render и не мешал старту Telegram-бота
+    asyncio.create_task(start_web_server())
+    
+    print("Алиса запускается...")
     try:
         await dp.start_polling(bot)
     finally:
@@ -225,7 +227,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nБот остановлен.")
         memory.shutdown()
-
-
-
-
