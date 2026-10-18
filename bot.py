@@ -17,7 +17,6 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# Актуальная рабочая модель Groq с поддержкой лонгридов
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not TOKEN:
@@ -32,6 +31,9 @@ ai = AsyncGroq(api_key=GROQ_API_KEY)
 groq_cooldown_until = 0.0
 bot_username = None
 BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
+
+# Защита от дублирования сообщений (храним ID недавно обработанных)
+processed_messages = set()
 
 
 @dp.message(CommandStart())
@@ -71,6 +73,15 @@ async def handle_all_messages(message: types.Message):
     global groq_cooldown_until
     global bot_username
 
+    # Защита от дублей: если этот message_id уже обрабатывали, сразу выходим
+    msg_unique_key = (message.chat.id, message.message_id)
+    if msg_unique_key in processed_messages:
+        return
+    processed_messages.add(msg_unique_key)
+    # Очищаем старые ID, чтобы память не раздувалась (держим последние 200)
+    if len(processed_messages) > 200:
+        processed_messages.pop()
+
     text = message.text
 
     if not text or text.startswith("/"):
@@ -78,12 +89,9 @@ async def handle_all_messages(message: types.Message):
 
     is_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
-    # В личных сообщениях игнорируем других ботов, но в ГРУППЕ разрешаем битву с Лизой (@LissaAI_bot)
     if message.from_user and message.from_user.is_bot and not is_group:
         return
 
-    # Если мы в группе, фильтруем по старому принципу (по имени, реплаю или упоминанию),
-    # НО если сообщение от Лизы-конкурента — пускаем в диалог обязательно для битвы!
     is_rival_bot = bool(
         is_group 
         and message.from_user 
@@ -150,7 +158,6 @@ async def handle_all_messages(message: types.Message):
     memory.add_message(chat_id, "user", user_message)
     history = memory.get_history(chat_id)
 
-    # Безопасная сборка истории
     valid_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in history:
         if isinstance(msg, dict) and "role" in msg and "content" in msg:
@@ -161,7 +168,7 @@ async def handle_all_messages(message: types.Message):
             model=GROQ_MODEL,
             messages=valid_messages,
             temperature=0.85,
-            max_tokens=3000,  # Увеличенный лимит для лонгридов
+            max_tokens=3000,
         )
         answer = response.choices[0].message.content
 
