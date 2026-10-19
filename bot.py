@@ -87,6 +87,8 @@ RIVAL_BOTS = {
 BOT_CHAIN_LIMIT = int(_env_number("BOT_CHAIN_LIMIT", 3))
 BOT_REPLY_COOLDOWN = _env_number("BOT_REPLY_COOLDOWN", 8.0)
 
+DEBUG_LOG = _env("DEBUG_LOG", "1") != "0"  # печатать в лог входящие сообщения групп (первые 40 символов)
+
 BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 SELF_PREFIX_RE = re.compile(r"^\s*(?:алиса|alisa|alice)\s*:\s*", re.IGNORECASE)
@@ -533,6 +535,12 @@ async def handle_all_messages(message: types.Message):
         return
     sender_is_bot = bool(sender and sender.is_bot)
 
+    if in_group and DEBUG_LOG:
+        print(
+            f"[вход] чат={chat_id} от=@{sender.username if sender else None} "
+            f"бот={sender_is_bot} текст={(message.text or '')[:40]!r}"
+        )
+
     if sender_is_bot:
         # Отвечаем только ботам-собеседникам из белого списка и только в группах
         if not in_group or (sender.username or "").lower() not in RIVAL_BOTS:
@@ -609,6 +617,9 @@ async def handle_all_messages(message: types.Message):
                         in_group,
                     )
                 return
+
+            if sender_is_bot and sender.username and f"@{sender.username}".lower() not in answer.lower():
+                answer = f"@{sender.username} {answer}"  # упоминание помогает конкуренту получить наш ответ
 
             memory.add_message(chat_id, "assistant", answer)
             success = True
