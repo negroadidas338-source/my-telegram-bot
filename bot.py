@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 from aiogram import BaseMiddleware, Bot, Dispatcher, types
 from aiogram.enums import ChatType
 from aiogram.exceptions import AiogramError, TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.utils.backoff import BackoffConfig
 from groq import APIConnectionError, APIStatusError, AsyncGroq
 
@@ -84,6 +84,7 @@ RIVAL_BOTS = {
     for name in _env("RIVAL_BOTS", "LissaAI_bot").split(",")
     if name.strip()
 }
+RIVAL_NAME = _env("RIVAL_NAME", "Лиза")  # по какому имени откликается конкурент (на @username он не реагирует)
 BOT_CHAIN_LIMIT = int(_env_number("BOT_CHAIN_LIMIT", 3))
 BOT_REPLY_COOLDOWN = _env_number("BOT_REPLY_COOLDOWN", 8.0)
 
@@ -505,7 +506,8 @@ async def help_command(message: types.Message):
         "• Просто писать мне — я отвечу и буду помнить наш недавний разговор\n"
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
-        "• /reset — забыть наш текущий диалог (история очистится)\n\n"
+        "• /reset — забыть наш текущий диалог (история очистится)\n"
+        "• /battle [тема] — в группе: начать перепалку с соперником\n\n"
         "В группе я отвечаю, если меня позвать по имени «Алиса», "
         "ответить на моё сообщение или упомянуть меня."
     )
@@ -518,6 +520,21 @@ async def reset_command(message: types.Message):
         "Хорошо, я всё забыла из нашего последнего разговора. "
         "Начинаем с чистого листа 💫"
     )
+
+
+@dp.message(Command("battle"))
+async def battle_command(message: types.Message, command: CommandObject):
+    """Запускает «битву»: Алиса первой обращается к конкуренту по имени."""
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Битва ботов работает только в группе — добавь меня туда вместе с соперником 😉")
+        return
+    topic = (command.args or "").strip()[:200]
+    opening = f"{RIVAL_NAME}, привет! Ну что, посмотрим, кто из нас умнее?"
+    if topic:
+        opening += f" Тема: {topic}."
+    bot_chain[message.chat.id] = 0
+    memory.add_message(message.chat.id, "assistant", opening)
+    await message.answer(opening)
 
 
 # ============================================================
@@ -618,8 +635,8 @@ async def handle_all_messages(message: types.Message):
                     )
                 return
 
-            if sender_is_bot and sender.username and f"@{sender.username}".lower() not in answer.lower():
-                answer = f"@{sender.username} {answer}"  # упоминание помогает конкуренту получить наш ответ
+            if sender_is_bot and not answer.casefold().startswith(RIVAL_NAME.casefold()):
+                answer = f"{RIVAL_NAME}, {answer}"  # конкурент откликается на имя в начале сообщения
 
             memory.add_message(chat_id, "assistant", answer)
             success = True
