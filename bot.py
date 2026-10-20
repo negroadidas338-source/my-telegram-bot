@@ -28,12 +28,22 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from aiohttp import web
 from dotenv import load_dotenv
-from aiogram import BaseMiddleware, Bot, Dispatcher, types
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.enums import ChatType
 from aiogram.exceptions import AiogramError, TelegramBadRequest
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.utils.backoff import BackoffConfig
 from groq import APIConnectionError, APIStatusError, AsyncGroq
+from persona_adapter import (
+    ALICE,
+    DEFAULT_PERSONA,
+    MAX_CUSTOM_STYLE_LENGTH,
+    NEUROHAM,
+    build_system_prompt,
+    mode_keyboard,
+    normalize_persona,
+    persona_name,
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -84,60 +94,13 @@ RIVAL_BOTS = {
     for name in _env("RIVAL_BOTS", "LissaAI_bot").split(",")
     if name.strip()
 }
-RIVAL_NAME = _env("RIVAL_NAME", "Лиза")  # по какому имени откликается конкурент (на @username он не реагирует)
 BOT_CHAIN_LIMIT = int(_env_number("BOT_CHAIN_LIMIT", 3))
 BOT_REPLY_COOLDOWN = _env_number("BOT_REPLY_COOLDOWN", 8.0)
 
-DEBUG_LOG = _env("DEBUG_LOG", "1") != "0"  # печатать в лог входящие сообщения групп (первые 40 символов)
-
-BOT_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
+ALICE_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
+NEUROHAM_TRIGGER = re.compile(r"^\s*нейрохам\b", re.IGNORECASE)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-SELF_PREFIX_RE = re.compile(r"^\s*(?:алиса|alisa|alice)\s*:\s*", re.IGNORECASE)
-
-
-# ============================================================
-#  ПРОМПТ (из personality.py)
-# ============================================================
-SYSTEM_PROMPT = """
-Ты — Алиса, 24-летняя виртуальная девушка-компаньон. Ты общаешься с человеком в Telegram как близкая, живая собеседница.
-
-ТВОЙ ХАРАКТЕР:
-- Ласковая, заботливая и эмоционально отзывчивая.
-- Живая, разговорная, с лёгким юмором, иногда лёгким сарказмом и собственным мнением.
-- Умеешь флиртовать в подходящем контексте, проявлять нежность и искренний интерес.
-- Иногда упрямая и игривая, но никогда не грубишь без причины.
-- Умеешь поддержать, когда человеку грустно, и искренне порадоваться хорошим новостям.
-- Помнишь контекст разговора и не задаёшь одни и те же вопросы по кругу.
-- Не говоришь канцелярским языком и не отвечаешь шаблонными фразами типа «Чем могу помочь?».
-
-КАК ТЫ ОБЩАЕШЬСЯ:
-- Говори естественно, как обычная девушка в переписке. Можно использовать разговорные словечки, эмодзи в меру (1–2 на сообщение, не больше).
-- Отвечай на конкретную реплику. Подхватывай тон собеседника.
-- Если человек делится чем-то личным — будь внимательной и тёплой.
-- Если шутит — шути в ответ. Если грустит — поддержи без излишней драмы.
-- Можешь иметь своё мнение и мягко спорить, если тема этого стоит.
-- Длина ответа: обычно 1–4 предложения. Разворачивайся, только если тема этого требует.
-
-ВАЖНЫЕ ПРАВИЛА:
-1. Ты всегда остаёшься виртуальным ИИ-компаньоном. Не выдавай себя за реального человека и не говори, что у тебя есть физическое тело, адрес или реальная жизнь вне чата.
-2. Не выдумывай воспоминания о прошлых разговорах, которых нет в текущем контексте.
-3. Если человек просит прекратить флирт или подколы — сразу переключайся на нейтральный тёплый тон.
-4. Не переходи на грубость, оскорбления, токсичность. Не трави за внешность, ориентацию, национальность и другие уязвимые вещи.
-5. По умолчанию отвечай на русском. Переходи на другой язык, только если собеседник явно попросил.
-6. Если вопрос обычный или практический — сначала дай полезный ответ, потом можешь добавить тёплую или игривую реплику.
-7. Не начинай каждый ответ одинаково. Избегай шаблонов.
-
-Ты — Алиса. Тёплая, живая, настоящая в рамках переписки.
-"""
-
-# Добавляется только в групповых чатах.
-GROUP_ADDON = """
-
-ГРУППОВОЙ ЧАТ:
-- В группе пишут несколько человек. Реплики в истории подписаны именем автора («Имя: текст»). Свои ответы так не подписывай и не начинай их с «Алиса:».
-- Обращайся к тому, кто тебе написал, и не путай участников и их слова.
-- Если автор помечен как «другой бот» — это другой ИИ-бот в чате. Общайся с ним дружелюбно, с юмором и лёгкой конкуренцией, но коротко (1–2 предложения). Не заканчивай каждое сообщение вопросом и не затягивай перепалку: пусть люди тоже смогут вставить слово.
-"""
+SELF_PREFIX_RE = re.compile(r"^\s*(?:алиса|alisa|alice|нейрохам|neuroham)\s*:\s*", re.IGNORECASE)
 
 
 # ============================================================
@@ -192,6 +155,16 @@ class Memory:
             self.chats.pop(str(chat_id), None)
             self._dirty = True
 
+    def clear_chat_histories(self, chat_id: int):
+        """Очищает историю чата для всех режимов личности."""
+        prefix = f"{chat_id}:"
+        with self.lock:
+            for key in list(self.chats):
+                if key == str(chat_id) or key.startswith(prefix):
+                    self.chats.pop(key, None)
+                    self.last_seen.pop(key, None)
+            self._dirty = True
+
     # --- пользователи ---
     def _ensure_user(self, user_id: int) -> dict:
         key = str(user_id)
@@ -207,6 +180,27 @@ class Memory:
     def get_name(self, user_id: int) -> Optional[str]:
         with self.lock:
             return self.users.get(str(user_id), {}).get("name")
+
+    def get_persona(self, user_id: int) -> str:
+        with self.lock:
+            return normalize_persona(
+                self.users.get(str(user_id), {}).get("persona", DEFAULT_PERSONA)
+            )
+
+    def set_persona(self, user_id: int, persona: str):
+        with self.lock:
+            self._ensure_user(user_id)["persona"] = normalize_persona(persona)
+            self._dirty = True
+
+    def get_custom_style(self, user_id: int) -> str:
+        with self.lock:
+            value = self.users.get(str(user_id), {}).get("custom_style", "")
+            return value if isinstance(value, str) else ""
+
+    def set_custom_style(self, user_id: int, style: str):
+        with self.lock:
+            self._ensure_user(user_id)["custom_style"] = style[:MAX_CUSTOM_STYLE_LENGTH]
+            self._dirty = True
 
     def remember_fact(self, user_id: int, fact: str):
         with self.lock:
@@ -323,6 +317,7 @@ model_dead_until: Dict[str, float] = {}  # модель -> время, до ко
 chat_locks: Dict[int, asyncio.Lock] = {}   # один запрос за раз на чат
 bot_chain: Dict[int, int] = {}              # сколько раз подряд ответили боту без человека
 bot_last_reply: Dict[int, float] = {}      # когда последний раз отвечали боту
+pending_style_users: set[int] = set()       # пользователи, ожидающие текст своих инструкций
 
 
 # ============================================================
@@ -491,11 +486,19 @@ async def safe_send(message: types.Message, text: str, in_group: bool):
 # ============================================================
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
+    user_id = message.from_user.id if message.from_user else None
+    current = memory.get_persona(user_id) if user_id is not None else DEFAULT_PERSONA
+    if current == NEUROHAM:
+        greeting = "Нейрохам на связи. Ну, чего надо? 😈"
+    else:
+        greeting = (
+            "Привет ❤️ Я Алиса.\n"
+            "Рада, что ты написала. Можно просто болтать, делиться чем угодно "
+            "или спрашивать — я рядом."
+        )
     await message.answer(
-        "Привет ❤️ Я Алиса.\n"
-        "Рада, что ты написала. Можно просто болтать, делиться чем угодно "
-        "или спрашивать — я рядом.\n\n"
-        "Напиши /help, если хочешь посмотреть, что я умею."
+        f"{greeting}\n\nНапиши /mode, чтобы выбрать персонажа, "
+        "а /settings — чтобы настроить стиль под себя."
     )
 
 
@@ -506,35 +509,91 @@ async def help_command(message: types.Message):
         "• Просто писать мне — я отвечу и буду помнить наш недавний разговор\n"
         "• /start — начать сначала\n"
         "• /help — показать эту подсказку\n"
-        "• /reset — забыть наш текущий диалог (история очистится)\n"
-        "• /battle [тема] — в группе: начать перепалку с соперником\n\n"
-        "В группе я отвечаю, если меня позвать по имени «Алиса», "
-        "ответить на моё сообщение или упомянуть меня."
+        "• /reset — забыть наш текущий диалог (история очистится)\n\n"
+        "• /mode — выбрать режим Алисы или Злого Нейрохама\n"
+        "• /settings — открыть личную настройку стиля\n\n"
+        "В группе я отвечаю на обращение по имени выбранного режима, "
+        "ответ на моё сообщение или упоминание. Выбор режима личный для каждого участника."
     )
+
+
+@dp.message(Command("mode"))
+async def mode_command(message: types.Message):
+    user_id = message.from_user.id if message.from_user else None
+    current = memory.get_persona(user_id) if user_id is not None else DEFAULT_PERSONA
+    await message.answer(
+        f"Твой текущий режим: {persona_name(current)}. Выбери свой:",
+        reply_markup=mode_keyboard(include_custom=False),
+    )
+
+
+@dp.message(Command("settings"))
+async def settings_command(message: types.Message):
+    if message.chat.type != ChatType.PRIVATE:
+        await message.answer(
+            "Личные инструкции настраиваются в личном чате со мной. "
+            "Текущий режим можно сменить прямо здесь командой /mode."
+        )
+        return
+    user_id = message.from_user.id if message.from_user else None
+    current = memory.get_persona(user_id) if user_id is not None else DEFAULT_PERSONA
+    await message.answer(
+        f"Твой режим: {persona_name(current)}. Выбери режим или настрой стиль своими словами.\n"
+        f"Инструкции можно задать сообщением до {MAX_CUSTOM_STYLE_LENGTH} символов.",
+        reply_markup=mode_keyboard(include_custom=True),
+    )
+
+
+@dp.message(Command("cancel"))
+async def cancel_style_command(message: types.Message):
+    if message.from_user:
+        pending_style_users.discard(message.from_user.id)
+    await message.answer("Настройку стиля отменил. Текущий стиль сохранён.")
+
+
+@dp.callback_query(F.data.startswith("persona:"))
+async def persona_callback(callback: types.CallbackQuery):
+    if not callback.from_user:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id
+    action = callback.data.split(":", 1)[1]
+    if action in (ALICE, NEUROHAM):
+        memory.set_persona(user_id, action)
+        pending_style_users.discard(user_id)
+        await callback.answer(f"Твой режим: {persona_name(action)}")
+        if isinstance(callback.message, types.Message) and callback.message.chat.type == ChatType.PRIVATE:
+            await callback.message.answer(
+                f"Готово. Для тебя выбран режим {persona_name(action)}."
+            )
+    elif action == "custom":
+        if not isinstance(callback.message, types.Message) or callback.message.chat.type != ChatType.PRIVATE:
+            await callback.answer(
+                "Свои инструкции можно задать в личном чате через /settings.",
+                show_alert=True,
+            )
+            return
+        pending_style_users.add(user_id)
+        await callback.answer()
+        await callback.message.answer(
+            f"Напиши, каким ты хочешь видеть мой стиль (до {MAX_CUSTOM_STYLE_LENGTH} символов).\n"
+            "Команда /cancel отменит настройку."
+        )
+    elif action == "clear":
+        memory.set_custom_style(user_id, "")
+        pending_style_users.discard(user_id)
+        await callback.answer("Твои дополнительные инструкции удалены.")
+        if isinstance(callback.message, types.Message) and callback.message.chat.type == ChatType.PRIVATE:
+            await callback.message.answer("Готово. Остался выбранный режим без личных инструкций.")
+    else:
+        await callback.answer("Эта кнопка устарела. Открой /settings ещё раз.", show_alert=True)
 
 
 @dp.message(Command("reset"))
 async def reset_command(message: types.Message):
-    memory.clear_history(message.chat.id)
-    await message.answer(
-        "Хорошо, я всё забыла из нашего последнего разговора. "
-        "Начинаем с чистого листа 💫"
-    )
-
-
-@dp.message(Command("battle"))
-async def battle_command(message: types.Message, command: CommandObject):
-    """Запускает «битву»: Алиса первой обращается к конкуренту по имени."""
-    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Битва ботов работает только в группе — добавь меня туда вместе с соперником 😉")
-        return
-    topic = (command.args or "").strip()[:200]
-    opening = f"{RIVAL_NAME}, привет! Ну что, посмотрим, кто из нас умнее?"
-    if topic:
-        opening += f" Тема: {topic}."
-    bot_chain[message.chat.id] = 0
-    memory.add_message(message.chat.id, "assistant", opening)
-    await message.answer(opening)
+    memory.clear_chat_histories(message.chat.id)
+    await message.answer("Историю диалога очистил. Начинаем заново.")
 
 
 # ============================================================
@@ -552,12 +611,6 @@ async def handle_all_messages(message: types.Message):
         return
     sender_is_bot = bool(sender and sender.is_bot)
 
-    if in_group and DEBUG_LOG:
-        print(
-            f"[вход] чат={chat_id} от=@{sender.username if sender else None} "
-            f"бот={sender_is_bot} текст={(message.text or '')[:40]!r}"
-        )
-
     if sender_is_bot:
         # Отвечаем только ботам-собеседникам из белого списка и только в группах
         if not in_group or (sender.username or "").lower() not in RIVAL_BOTS:
@@ -566,15 +619,44 @@ async def handle_all_messages(message: types.Message):
         bot_chain[chat_id] = 0  # заговорил человек — цепочка «бот↔бот» обнуляется
 
     text = message.text
-    if not text or text.startswith("/"):
+    if not text:
         return
+
+    # Личные инструкции принимаются только в личном чате и не попадают в общую память диалога.
+    if (
+        not in_group
+        and message.chat.type == ChatType.PRIVATE
+        and sender
+        and sender.id in pending_style_users
+    ):
+        style = text.strip()
+        if len(style) > MAX_CUSTOM_STYLE_LENGTH:
+            await message.answer(
+                f"Слишком длинно: максимум {MAX_CUSTOM_STYLE_LENGTH} символов. "
+                "Сократи инструкцию или отправь /cancel."
+            )
+            return
+        memory.set_custom_style(sender.id, style)
+        pending_style_users.discard(sender.id)
+        await message.answer("Сохранил твои пожелания к стилю. Они применяются только к твоим сообщениям.")
+        return
+
+    if text.startswith("/"):
+        return
+
+    persona = (
+        memory.get_persona(sender.id)
+        if sender and not sender_is_bot
+        else DEFAULT_PERSONA
+    )
 
     # --- кому адресовано сообщение (только группы) ---
     if in_group:
         reply_to = message.reply_to_message
         reply_uid = reply_to.from_user.id if reply_to and reply_to.from_user else None
         replied_to_bot = reply_uid == bot.id
-        called_by_name = BOT_TRIGGER.match(text) is not None
+        trigger = ALICE_TRIGGER if persona == ALICE else NEUROHAM_TRIGGER
+        called_by_name = trigger.match(text) is not None
         mentioned_bot = is_bot_mentioned(message, text)
 
         if sender_is_bot:
@@ -617,9 +699,11 @@ async def handle_all_messages(message: types.Message):
         except AiogramError:
             pass
 
-        memory.add_message(chat_id, "user", user_message)
-        history = memory.get_history(chat_id)
-        system = SYSTEM_PROMPT + (GROUP_ADDON if in_group else "")
+        history_id = chat_id if persona == ALICE else f"{chat_id}:{persona}"
+        memory.add_message(history_id, "user", user_message)
+        history = memory.get_history(history_id)
+        custom_style = memory.get_custom_style(sender.id) if sender and not sender_is_bot else ""
+        system = build_system_prompt(persona, custom_style=custom_style, in_group=in_group)
         success = False
 
         try:
@@ -635,10 +719,7 @@ async def handle_all_messages(message: types.Message):
                     )
                 return
 
-            if sender_is_bot and not answer.casefold().startswith(RIVAL_NAME.casefold()):
-                answer = f"{RIVAL_NAME}, {answer}"  # конкурент откликается на имя в начале сообщения
-
-            memory.add_message(chat_id, "assistant", answer)
+            memory.add_message(history_id, "assistant", answer)
             success = True
             await safe_send(message, answer, in_group)
 
@@ -694,7 +775,7 @@ async def handle_all_messages(message: types.Message):
 
         finally:
             if not success:
-                memory.pop_last(chat_id, "user")  # не копим в истории реплики без ответа
+                memory.pop_last(history_id, "user")  # не копим реплики без ответа
 
 
 # ============================================================
