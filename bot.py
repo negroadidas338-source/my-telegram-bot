@@ -17,12 +17,14 @@
 """
 
 import asyncio
+import html
 import json
 import os
 import random
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -318,6 +320,46 @@ chat_locks: Dict[int, asyncio.Lock] = {}   # один запрос за раз �
 bot_chain: Dict[int, int] = {}              # сколько раз подряд ответили боту без человека
 bot_last_reply: Dict[int, float] = {}      # когда последний раз отвечали боту
 pending_style_users: set[int] = set()       # пользователи, ожидающие текст своих инструкций
+pending_wish_users: set[int] = set()
+pending_clear_wishes_users: set[int] = set()
+WISHES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wishes.json")
+WISH_BUTTON_TEXT = "📝 Оставить пожелание"
+
+
+def read_wishes() -> List[dict]:
+    try:
+        with open(WISHES_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except (json.JSONDecodeError, OSError) as error:
+        print(f"⚠️ Ошибка чтения пожеланий: {error}")
+        return []
+
+
+def write_wishes(wishes: List[dict]) -> bool:
+    tmp_path = WISHES_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as file:
+            json.dump(wishes, file, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, WISHES_FILE)
+        return True
+    except OSError as error:
+        print(f"⚠️ Ошибка записи пожеланий: {error}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
+
+
+def wishes_keyboard() -> types.ReplyKeyboardMarkup:
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=WISH_BUTTON_TEXT)]],
+        resize_keyboard=True,
+    )
 
 
 # ============================================================
@@ -498,7 +540,8 @@ async def start_command(message: types.Message):
         )
     await message.answer(
         f"{greeting}\n\nНапиши /mode, чтобы выбрать персонажа, "
-        "а /settings — чтобы настроить стиль под себя."
+        "а /settings — чтобы настроить стиль под себя.",
+        reply_markup=wishes_keyboard() if message.chat.type == ChatType.PRIVATE else None,
     )
 
 
@@ -548,7 +591,54 @@ async def settings_command(message: types.Message):
 async def cancel_style_command(message: types.Message):
     if message.from_user:
         pending_style_users.discard(message.from_user.id)
-    await message.answer("Настройку стиля отменил. Текущий стиль сохранён.")
+        pending_wish_users.discard(message.from_user.id)
+        pending_clear_wishes_users.discard(message.from_user.id)
+    await message.answer("Ввод отменён. Сохранённые настройки не изменены.")
+
+
+@dp.message(Command("wishes"))
+async def wishes_command(message: types.Message):
+    wishes = read_wishes()
+    if not wishes:
+        await message.answer("Пока пожеланий нет.")
+        return
+    chunks: List[str] = []
+    current = ""
+    for index, wish in enumerate(wishes, 1):
+        name = html.escape(str(wish.get("user_name") or "Неизвестный пользователь"))
+        date = html.escape(str(wish.get("created_at") or ""))
+        text = html.escape(str(wish.get("text") or ""))
+        entry = f"{index}. <b>{name}</b> ({date})\n{text}"
+        candidate = f"{current}\n\n{entry}" if current else entry
+        if len(candidate) > 3500 and current:
+            chunks.append(current)
+            current = entry
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    for chunk in chunks:
+        await message.answer(chunk, parse_mode="HTML")
+
+
+@dp.message(Command("clear_wishes"))
+async def clear_wishes_command(message: types.Message):
+    if message.from_user:
+        pending_clear_wishes_users.add(message.from_user.id)
+    await message.answer("Чтобы очистить все пожелания, отправь /confirm_clear_wishes. Для отмены — /cancel.")
+
+
+@dp.message(Command("confirm_clear_wishes"))
+async def confirm_clear_wishes_command(message: types.Message):
+    user_id = message.from_user.id if message.from_user else None
+    if user_id is None or user_id not in pending_clear_wishes_users:
+        await message.answer("Сначала нужно вызвать /clear_wishes.")
+        return
+    if write_wishes([]):
+        pending_clear_wishes_users.discard(user_id)
+        await message.answer("Список пожеланий очищен.")
+    else:
+        await message.answer("Не удалось очистить список пожеланий. Попробуй ещё раз.")
 
 
 @dp.callback_query(F.data.startswith("persona:"))
@@ -621,6 +711,34 @@ async def handle_all_messages(message: types.Message):
     text = message.text
     if not text:
         return
+
+    # Пожелания принимаются только от обычных пользователей в личном чате.
+    if message.chat.type == ChatType.PRIVATE and sender and not sender_is_bot:
+        if text == WISH_BUTTON_TEXT:
+            pending_wish_users.add(sender.id)
+            await message.answer("Напиши своё пожелание одним сообщением. Для отмены отправь /cancel")
+            return
+        if sender.id in pending_wish_users:
+            if text.startswith("/"):
+                await message.answer("Отправь текст пожелания или /cancel для отмены.")
+                return
+            wish_text = text.strip()
+            if len(wish_text) > 2000:
+                await message.answer("Пожелание слишком длинное. Сократи текст до 2000 символов.")
+                return
+            wishes = read_wishes()
+            wishes.append({
+                "user_id": sender.id,
+                "user_name": sender.full_name,
+                "text": wish_text,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            if write_wishes(wishes):
+                pending_wish_users.discard(sender.id)
+                await message.answer("Спасибо! Пожелание записано")
+            else:
+                await message.answer("Не удалось записать пожелание. Попробуй ещё раз позже.")
+            return
 
     # Личные инструкции принимаются только в личном чате и не попадают в общую память диалога.
     if (
