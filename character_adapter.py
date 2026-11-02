@@ -45,7 +45,7 @@ function renderChat(){root.innerHTML=`<div class="chat-head"><button class="back
 function addBubble(role,text){const log=document.getElementById('log');if(!log)return;const b=document.createElement('div');b.className='bubble '+(role==='user'?'user':'assistant');b.textContent=text;log.appendChild(b);scrollLog()}
 function scrollLog(){const l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight}
 async function sendMessage(e){e.preventDefault();if(busy)return;const input=document.getElementById('message');const text=input.value.trim();if(!text)return;input.value='';busy=true;document.getElementById('send').disabled=true;addBubble('user',text);const loading=document.createElement('div');loading.className='spinner';loading.textContent=active.name+' пишет…';document.getElementById('log').appendChild(loading);scrollLog();try{const d=await api('/api/chat/'+encodeURIComponent(active.id),'POST',{text});loading.remove();addBubble('assistant',d.answer);history=d.messages}catch(err){loading.remove();showError(err)}finally{busy=false;const b=document.getElementById('send');if(b)b.disabled=false}}
-async function boot(){if(!initData){root.innerHTML=header('Открой в Telegram')+'<main><div class="empty">Этот каталог работает внутри Telegram.<br>Открой бота и нажми кнопку «Персонажи».</div></main>';return}await go('catalog')}
+async function boot(){if(!initData){root.innerHTML=header('Открой из сообщения бота')+'<main><div class="empty">Закрой это окно. В чате бота отправь /characters и нажми кнопку под ответом.<br><br>Кнопка под сообщением передаст Mini App данные для безопасного входа.</div></main>';return}await go('catalog')}
 boot();
 </script></body></html>'''
 
@@ -195,12 +195,11 @@ class CharacterAdapter:
     def keyboard(self):
         if not self.app_url:
             return None
-        return types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(
-                text="🎭 Персонажи",
+        return types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(
+                text="🎭 Открыть каталог персонажей",
                 web_app=types.WebAppInfo(url=self.app_url),
             )]],
-            resize_keyboard=True,
         )
 
     def register_commands(self) -> None:
