@@ -234,7 +234,6 @@ class CharacterAdapter:
         try:
             values = dict(parse_qsl(raw, keep_blank_values=True, strict_parsing=True))
             received_hash = values.pop("hash")
-            values.pop("signature", None)
             auth_date = int(values["auth_date"])
             user = json.loads(values["user"])
             user_id = int(user["id"])
@@ -243,8 +242,12 @@ class CharacterAdapter:
         check_string = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))
         secret_key = hmac.new(b"WebAppData", self.bot_token.encode("utf-8"), hashlib.sha256).digest()
         expected_hash = hmac.new(secret_key, check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected_hash, received_hash) or abs(time.time() - auth_date) > 86400:
-            raise web.HTTPUnauthorized(text=json.dumps({"error": "Сессия Telegram истекла. Закрой и снова открой приложение."}), content_type="application/json")
+        if not hmac.compare_digest(expected_hash, received_hash):
+            print("Telegram Mini App authorization rejected: HMAC verification failed.")
+            raise web.HTTPUnauthorized(text=json.dumps({"error": "Telegram не подтвердил подпись запуска. Отправь /characters и открой новое сообщение."}), content_type="application/json")
+        if abs(time.time() - auth_date) > 86400:
+            print(f"Telegram Mini App authorization expired: age_seconds={int(time.time() - auth_date)}.")
+            raise web.HTTPUnauthorized(text=json.dumps({"error": "Сессия Telegram истекла. Закрой приложение, отправь /characters и открой новое сообщение."}), content_type="application/json")
         return user_id
 
     async def _json(self, request: web.Request) -> dict:
