@@ -47,7 +47,78 @@ function scrollLog(){const l=document.getElementById('log');if(l)l.scrollTop=l.s
 async function sendMessage(e){e.preventDefault();if(busy)return;const input=document.getElementById('message');const text=input.value.trim();if(!text)return;input.value='';busy=true;document.getElementById('send').disabled=true;addBubble('user',text);const loading=document.createElement('div');loading.className='spinner';loading.textContent=active.name+' пишет…';document.getElementById('log').appendChild(loading);scrollLog();try{const d=await api('/api/chat/'+encodeURIComponent(active.id),'POST',{text});loading.remove();addBubble('assistant',d.answer);history=d.messages}catch(err){loading.remove();showError(err)}finally{busy=false;const b=document.getElementById('send');if(b)b.disabled=false}}
 async function boot(){if(!initData){root.innerHTML=header('Открой из сообщения бота')+'<main><div class="empty">Закрой это окно. В чате бота отправь /characters и нажми кнопку под ответом.<br><br>Кнопка под сообщением передаст Mini App данные для безопасного входа.</div></main>';return}await go('catalog')}
 boot();
-</script></body></html>'''
+</script><script src="/feedback-ui.js"></script></body></html>'''
+
+
+FEEDBACK_UI_JS = r'''(function(){
+  const originalRender = window.render;
+  let selectedRating = 5;
+  window.render = function(){
+    if (page === 'feedback') { renderFeedback(); return; }
+    originalRender();
+    if (page === 'profile') {
+      const main = root.querySelector('main');
+      if (main && !main.querySelector('#feedbackOpen')) {
+        const button = document.createElement('button');
+        button.id = 'feedbackOpen';
+        button.className = 'primary';
+        button.style.margin = '0 0 22px';
+        button.textContent = '★  Оставить отзыв';
+        button.onclick = function(){ page = 'feedback'; render(); };
+        main.prepend(button);
+      }
+    }
+  };
+  function renderFeedback(){
+    root.innerHTML = `<main><button class="back" onclick="page='profile';render()">‹  Назад в профиль</button><h1 style="font-size:24px;margin:4px 0 5px">Твой отзыв</h1><div class="sub">Помоги сделать бота лучше</div><form id="feedbackForm"><label class="label">Оценка</label><div id="ratingStars" style="display:flex;gap:8px;margin:8px 0 18px">${[1,2,3,4,5].map(n=>`<button type="button" onclick="feedbackRate(${n})" aria-label="${n}">${n<=selectedRating?'★':'☆'}</button>`).join('')}</div><label class="label" for="feedbackText">Комментарий</label><textarea id="feedbackText" class="field fieldarea" maxlength="1500" placeholder="Что понравилось или что стоит улучшить?"></textarea><div class="sub" style="margin:8px 0 18px">Комментарий можно не заполнять</div><button class="primary" id="feedbackSubmit">Отправить отзыв</button></form></main>`;
+    document.querySelectorAll('#ratingStars button').forEach(b=>{b.style.cssText='border:0;background:#f2efff;color:#7657ed;border-radius:12px;width:48px;height:48px;font-size:27px';});
+    document.getElementById('feedbackForm').onsubmit = submitFeedback;
+  }
+  window.feedbackRate = function(value){
+    selectedRating = Math.max(1, Math.min(5, Number(value)||5));
+    document.querySelectorAll('#ratingStars button').forEach((button,index)=>button.textContent=index<selectedRating?'★':'☆');
+  };
+  async function submitFeedback(event){
+    event.preventDefault();
+    const button=document.getElementById('feedbackSubmit');
+    const message=document.getElementById('feedbackText').value.trim();
+    button.disabled=true;
+    try{
+      await api('/api/feedback','POST',{rating:selectedRating,message});
+      root.innerHTML='<main><div class="empty"><div style="font-size:42px;color:#7657ed">✓</div><h1 style="font-size:23px">Спасибо за отзыв!</h1><div class="sub">Он поможет улучшить бота.</div><button class="primary" style="margin-top:24px" onclick="page=\'profile\';render()">Вернуться в профиль</button></div></main>';
+    }catch(error){showError(error);button.disabled=false;}
+  }
+})();'''
+
+
+class FeedbackStore:
+    """Private feedback storage; submissions are never listed in the Mini App."""
+
+    def __init__(self, data_dir: str):
+        os.makedirs(data_dir, exist_ok=True)
+        self.path = os.path.join(data_dir, "feedback.json")
+        self.lock = threading.RLock()
+
+    def add(self, row: dict) -> None:
+        with self.lock:
+            try:
+                with open(self.path, "r", encoding="utf-8") as file:
+                    rows = json.load(file)
+                if not isinstance(rows, list):
+                    rows = []
+            except FileNotFoundError:
+                rows = []
+            tmp_path = self.path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as file:
+                json.dump([*rows, row], file, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.path)
+
+
+# Telegram Mini App launch data may be reused when the app is reopened from a
+# cached WebView. Keep signed data usable for a limited period while rejecting
+# clearly stale credentials and timestamps far in the future.
+INIT_DATA_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+INIT_DATA_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def _utc_now() -> str:
@@ -189,6 +260,7 @@ class CharacterAdapter:
         self.base_url = base_url.rstrip("/")
         self.app_url = f"{self.base_url}/app" if self.base_url.startswith("https://") else ""
         self.store = CharacterStore(data_dir)
+        self.feedback_store = FeedbackStore(data_dir)
         self.generate_reply = generate_reply
         self.chat_locks: dict[str, asyncio.Lock] = {}
 
@@ -214,9 +286,57 @@ class CharacterAdapter:
         app.router.add_route("PATCH", "/api/character/{character_id}", self.visibility)
         app.router.add_get("/api/chat/{character_id}", self.get_chat)
         app.router.add_post("/api/chat/{character_id}", self.send_chat)
+        app.router.add_get("/feedback-ui.js", self.feedback_ui_script)
+        app.router.add_post("/api/feedback", self.submit_feedback)
 
     async def app_page(self, request: web.Request) -> web.Response:
         return web.Response(text=APP_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+    async def feedback_ui_script(self, request: web.Request) -> web.Response:
+        return web.Response(
+            text=FEEDBACK_UI_JS,
+            content_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def submit_feedback(self, request: web.Request) -> web.Response:
+        self._user_id(request)  # Validate the Telegram launch, but keep feedback anonymous.
+        try:
+            data = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            raise web.HTTPBadRequest(
+                text='{"error":"Не удалось прочитать отзыв."}',
+                content_type="application/json",
+            )
+        if not isinstance(data, dict):
+            raise web.HTTPBadRequest(
+                text='{"error":"Проверь поля отзыва."}',
+                content_type="application/json",
+            )
+        try:
+            rating = int(data.get("rating", 0))
+        except (ValueError, TypeError):
+            rating = 0
+        message = str(data.get("message", "")).strip()
+        if rating not in range(1, 6) or len(message) > 1500:
+            raise web.HTTPBadRequest(
+                text='{"error":"Выбери оценку от 1 до 5 и проверь длину комментария."}',
+                content_type="application/json",
+            )
+        row = {
+            "rating": rating,
+            "message": message,
+            "created_at": _utc_now(),
+        }
+        try:
+            self.feedback_store.add(row)
+        except OSError as error:
+            print(f"Could not save Mini App feedback: {type(error).__name__}")
+            raise web.HTTPInternalServerError(
+                text='{"error":"Не удалось сохранить отзыв. Попробуй позже."}',
+                content_type="application/json",
+            )
+        return self._response({"ok": True})
 
     async def open_app_command(self, message: types.Message) -> None:
         if message.chat.type != ChatType.PRIVATE:
@@ -245,9 +365,13 @@ class CharacterAdapter:
         if not hmac.compare_digest(expected_hash, received_hash):
             print("Telegram Mini App authorization rejected: HMAC verification failed.")
             raise web.HTTPUnauthorized(text=json.dumps({"error": "Telegram не подтвердил подпись запуска. Отправь /characters и открой новое сообщение."}), content_type="application/json")
-        if abs(time.time() - auth_date) > 86400:
-            print(f"Telegram Mini App authorization expired: age_seconds={int(time.time() - auth_date)}.")
-            raise web.HTTPUnauthorized(text=json.dumps({"error": "Сессия Telegram истекла. Закрой приложение, отправь /characters и открой новое сообщение."}), content_type="application/json")
+        age_seconds = int(time.time()) - auth_date
+        if age_seconds > INIT_DATA_MAX_AGE_SECONDS:
+            print(f"Telegram Mini App authorization expired: age_seconds={age_seconds}.")
+            raise web.HTTPUnauthorized(text=json.dumps({"error": "Данные входа Telegram устарели. Закрой Mini App полностью, отправь /characters и открой приложение из нового сообщения."}), content_type="application/json")
+        if age_seconds < -INIT_DATA_FUTURE_SKEW_SECONDS:
+            print(f"Telegram Mini App authorization timestamp is in the future: age_seconds={age_seconds}.")
+            raise web.HTTPUnauthorized(text=json.dumps({"error": "Время на сервере бота не совпадает с временем Telegram. Попробуй открыть приложение позже."}), content_type="application/json")
         return user_id
 
     async def _json(self, request: web.Request) -> dict:
