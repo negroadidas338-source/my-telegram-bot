@@ -113,6 +113,15 @@ class FeedbackStore:
                 json.dump([*rows, row], file, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self.path)
 
+    def list_all(self) -> list[dict]:
+        with self.lock:
+            try:
+                with open(self.path, "r", encoding="utf-8") as file:
+                    rows = json.load(file)
+                return rows if isinstance(rows, list) else []
+            except FileNotFoundError:
+                return []
+
 
 # Telegram Mini App launch data may be reused when the app is reopened from a
 # cached WebView. Keep signed data usable for a limited period while rejecting
@@ -276,6 +285,41 @@ class CharacterAdapter:
 
     def register_commands(self) -> None:
         self.dp.message.register(self.open_app_command, Command("characters"))
+        self.dp.message.register(self.show_feedback_command, Command("feedbacks"))
+
+    async def show_feedback_command(self, message: types.Message) -> None:
+        if message.chat.type != ChatType.PRIVATE:
+            await message.answer("Отзывы можно просматривать только в личном чате с ботом.")
+            return
+        parts = (message.text or "").split()
+        try:
+            page = max(1, int(parts[1])) if len(parts) > 1 else 1
+        except ValueError:
+            await message.answer("Используй команду так: /feedbacks или /feedbacks 2")
+            return
+        rows = self.feedback_store.list_all()
+        if not rows:
+            await message.answer("Пока отзывов нет.")
+            return
+        newest_first = list(reversed(rows))
+        page_size = 5
+        start = (page - 1) * page_size
+        selected = newest_first[start:start + page_size]
+        page_count = max(1, (len(newest_first) + page_size - 1) // page_size)
+        if not selected:
+            await message.answer(f"Такой страницы нет. Отправь /feedbacks {page_count}")
+            return
+        blocks = []
+        for offset, row in enumerate(selected):
+            index = len(newest_first) - start - offset
+            date = str(row.get("created_at", ""))[:19].replace("T", " ")
+            rating = max(0, min(5, int(row.get("rating", 0))))
+            comment = str(row.get("message", "")).strip() or "Комментария нет."
+            blocks.append(f"Отзыв №{index} · {'★' * rating}{'☆' * (5 - rating)} · {date}\n{comment}")
+        text = "\n\n──────────────\n\n".join(blocks)
+        text += f"\n\nСтраница {page}/{page_count}. Следующая: /feedbacks {page + 1}" if page < page_count else f"\n\nСтраница {page}/{page_count}."
+        for offset in range(0, len(text), 3800):
+            await message.answer(text[offset:offset + 3800])
 
     def register_routes(self, app: web.Application) -> None:
         app.router.add_get("/app", self.app_page)
