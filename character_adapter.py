@@ -25,7 +25,7 @@ APP_HTML = r'''<!doctype html>
 :root{--purple:#7657ed;--ink:#25243a;--muted:#82839b;--line:#ecebf3;--soft:#f7f7fb;--lav:#f2efff}*{box-sizing:border-box}body{margin:0;background:#f5f4fb;color:var(--ink);font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer}#app{max-width:520px;min-height:100dvh;margin:auto;background:#fff;position:relative;padding-bottom:78px;box-shadow:0 0 36px #3025680c}.top{padding:22px 20px 14px;background:white;position:sticky;top:0;z-index:3;border-bottom:1px solid #f0eff5}.eyebrow{font-size:11px;letter-spacing:.12em;color:var(--purple);font-weight:800}.top h1{margin:7px 0 4px;font-size:24px}.sub{font-size:13px;color:var(--muted)}main{padding:16px 20px 28px}.search,.field{width:100%;border:1px solid #e8e7f0;background:var(--soft);border-radius:13px;padding:13px 14px;color:var(--ink);outline:none}.search:focus,.field:focus{border-color:#bcb0ff}.section-title{font-size:16px;font-weight:750;margin:22px 0 12px}.card{border:1px solid var(--line);border-radius:17px;padding:14px;display:flex;gap:12px;align-items:center;margin:10px 0;background:white;cursor:pointer}.avatar{width:54px;height:54px;border-radius:50%;background:linear-gradient(135deg,#f9b78e,#dd6c79);display:grid;place-items:center;color:white;font-size:20px;font-weight:750;flex:none;overflow:hidden}.avatar img{width:100%;height:100%;object-fit:cover}.card-info{min-width:0;flex:1}.card-name{font-size:14px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card-desc{font-size:12px;color:var(--muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tag{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.04em;background:var(--lav);color:var(--purple);border-radius:20px;padding:5px 8px;margin-top:8px}.primary{border:0;border-radius:15px;background:var(--purple);color:white;font-weight:750;padding:16px;width:100%;box-shadow:0 5px 14px #7657ed24}.primary:disabled{opacity:.55}.outline{border:1px solid #ded9f5;background:white;color:var(--purple);border-radius:12px;padding:10px 12px;font-weight:650}.bottom{position:fixed;z-index:4;bottom:0;left:50%;transform:translateX(-50%);width:min(520px,100%);height:66px;background:#ffffffed;backdrop-filter:blur(14px);border-top:1px solid var(--line);display:flex;justify-content:space-around;align-items:center}.nav{border:0;background:none;color:var(--muted);font-size:12px;padding:10px}.nav.active{color:var(--purple);font-weight:750}.label{display:block;font-size:11px;font-weight:800;letter-spacing:.045em;margin:17px 0 7px}.field{font-size:14px}.fieldarea{min-height:96px;resize:vertical;line-height:1.45}.photo-row{display:flex;align-items:center;gap:14px;margin:10px 0 18px}.photo-add{border:1px dashed #b9aff4;background:#f2efff;color:var(--purple);border-radius:50%;width:64px;height:64px;font-size:25px}.checkbox{display:flex;align-items:center;gap:9px;font-size:13px;margin:17px 0}.checkbox input{accent-color:var(--purple);width:18px;height:18px}.back{color:var(--purple);font-weight:700;border:0;background:none;padding:4px 0 12px}.chat-head{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:white;z-index:2}.chat-head .avatar{width:42px;height:42px}.online{font-size:11px;color:#6ea88b;margin-top:3px}.chat-log{padding:18px 16px 96px;display:flex;flex-direction:column;gap:12px;min-height:65vh;background:#fff}.bubble{max-width:84%;padding:12px 14px;border-radius:17px;background:#f4f2fa;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:var(--purple);color:white}.bubble.assistant{align-self:flex-start}.chat-form{position:fixed;bottom:76px;left:50%;transform:translateX(-50%);width:min(488px,calc(100% - 28px));display:flex;gap:8px;background:#f7f7fb;border:1px solid #e8e7f0;border-radius:22px;padding:7px}.chat-form input{border:0;background:transparent;outline:0;min-width:0;flex:1;padding:8px}.send{width:40px;height:40px;border:0;border-radius:50%;background:var(--purple);color:white;font-size:18px}.empty{text-align:center;padding:42px 16px;color:var(--muted);line-height:1.5}.error{margin:12px 0;padding:11px 13px;color:#a23d53;background:#fff0f2;border-radius:12px;font-size:13px}.spinner{opacity:.65;text-align:center;padding:20px}
 </style></head><body><div id="app"></div><script>
 const tg=window.Telegram&&window.Telegram.WebApp; if(tg){tg.ready();tg.expand();try{tg.setHeaderColor('#ffffff');tg.setBackgroundColor('#f5f4fb')}catch(e){}}
-const initData=tg?tg.initData:'';const root=document.getElementById('app');let page='catalog',items=[],myChats=[],active=null,history=[],busy=false;
+const initData=tg?tg.initData:'';const root=document.getElementById('app');let page='catalog',items=[],myChats=[],active=null,history=[],chatMemory='',busy=false;
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function avatar(c){return c.avatar?`<div class="avatar"><img src="${esc(c.avatar)}" alt=""></div>`:`<div class="avatar">${esc((c.name||'?').slice(0,1).toUpperCase())}</div>`}
 async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{'Content-Type':'application/json','X-Telegram-Init-Data':initData},body:body?JSON.stringify(body):undefined});const d=await r.json().catch(()=>({error:'Ошибка ответа сервера'}));if(!r.ok)throw Error(d.error||'Не удалось выполнить запрос');return d}
@@ -38,10 +38,12 @@ function render(){if(page==='create'){renderCreate();return}if(page==='chat'&&ac
 function filterCards(){const q=document.getElementById('q').value.toLowerCase();document.getElementById('cards').innerHTML=items.filter(c=>(c.name+' '+c.description).toLowerCase().includes(q)).map(card).join('')||'<div class="empty">Ничего не найдено</div>'}
 function renderCreate(){root.innerHTML=`<main><button class="back" onclick="go('catalog')">‹  Назад</button><h1 style="font-size:24px;margin:0 0 5px">Создать персонажа</h1><div class="sub">Опиши его — и начни общение</div><form id="createForm"><div class="photo-row"><button type="button" class="photo-add" onclick="document.getElementById('photo').click()">＋</button><div><b>Фото персонажа</b><div class="sub" style="margin-top:5px">Необязательно · нажми, чтобы добавить</div></div><input id="photo" type="file" accept="image/png,image/jpeg,image/webp" hidden></div><label class="label">Имя персонажа *</label><input class="field" name="name" maxlength="32" required placeholder="Например, Лея"><label class="label">Короткое описание</label><textarea class="field fieldarea" name="description" maxlength="120" style="min-height:66px" placeholder="Кто это и чем интересен?"></textarea><label class="label">Характер и правила общения</label><textarea class="field fieldarea" name="definition" maxlength="2000" required placeholder="Опиши личность, манеру общения и важные детали..."></textarea><label class="label">Первое сообщение</label><textarea class="field fieldarea" name="greeting" maxlength="400" placeholder="С чего персонаж начнёт разговор?"></textarea><label class="checkbox"><input type="checkbox" name="is_public" checked>Показывать персонажа в общем каталоге</label><button class="primary" id="createBtn">Создать персонажа</button></form></main>`;document.getElementById('photo').onchange=previewPhoto;document.getElementById('createForm').onsubmit=createCharacter}
 let photoData='';function previewPhoto(e){const f=e.target.files[0];if(!f)return;if(f.size>260000){showError(Error('Фото должно быть меньше 250 КБ'));e.target.value='';return}const r=new FileReader();r.onload=()=>{photoData=r.result;document.querySelector('.photo-add').style.background=`center/cover no-repeat url('${photoData}')`;document.querySelector('.photo-add').textContent=''};r.readAsDataURL(f)}
-async function createCharacter(e){e.preventDefault();const f=e.currentTarget;const b=document.getElementById('createBtn');b.disabled=true;try{const fd=new FormData(f);const c=await api('/api/create','POST',{name:fd.get('name'),description:fd.get('description'),definition:fd.get('definition'),greeting:fd.get('greeting'),is_public:fd.has('is_public'),avatar:photoData});active=c.character;history=[{role:'assistant',content:active.greeting}];page='chat';renderChat()}catch(err){showError(err);b.disabled=false}}
+async function createCharacter(e){e.preventDefault();const f=e.currentTarget;const b=document.getElementById('createBtn');b.disabled=true;try{const fd=new FormData(f);const c=await api('/api/create','POST',{name:fd.get('name'),description:fd.get('description'),definition:fd.get('definition'),greeting:fd.get('greeting'),is_public:fd.has('is_public'),avatar:photoData});active=c.character;history=[{role:'assistant',content:active.greeting}];chatMemory='';page='chat';renderChat()}catch(err){showError(err);b.disabled=false}}
 async function togglePublic(id,value){try{await api('/api/character/'+encodeURIComponent(id),'PATCH',{is_public:value});go('profile')}catch(e){showError(e)}}
-async function openChat(id){try{const d=await api('/api/chat/'+encodeURIComponent(id));active=d.character;history=d.messages;page='chat';renderChat();if(!history.length&&active.greeting){history=[{role:'assistant',content:active.greeting}];addBubble('assistant',active.greeting)}}catch(e){showError(e)}}
-function renderChat(){root.innerHTML=`<div class="chat-head"><button class="back" style="padding:8px" onclick="go('catalog')">‹</button>${avatar(active)}<div><b>${esc(active.name)}</b><div class="online">● созданный персонаж</div></div></div><section class="chat-log" id="log">${history.map(m=>`<div class="bubble ${m.role==='user'?'user':'assistant'}">${esc(m.content)}</div>`).join('')}</section><form class="chat-form" id="chatForm"><input id="message" maxlength="4000" placeholder="Написать сообщение…" autocomplete="off"><button class="send" id="send" aria-label="Отправить">➜</button></form>`;document.getElementById('chatForm').onsubmit=sendMessage;scrollLog()}
+async function openChat(id){try{const d=await api('/api/chat/'+encodeURIComponent(id));active=d.character;history=d.messages;chatMemory=d.memory||'';page='chat';renderChat();if(!history.length&&active.greeting){history=[{role:'assistant',content:active.greeting}];addBubble('assistant',active.greeting)}}catch(e){showError(e)}}
+function renderChat(){root.innerHTML=`<div class="chat-head"><button class="back" style="padding:8px" onclick="go('catalog')">‹</button>${avatar(active)}<div style="min-width:0;flex:1"><b>${esc(active.name)}</b><div class="online">● созданный персонаж</div></div><button class="outline" style="padding:9px 10px;white-space:nowrap" onclick="editMemory()">🧠 Память</button></div><section class="chat-log" id="log">${history.map(m=>`<div class="bubble ${m.role==='user'?'user':'assistant'}">${esc(m.content)}</div>`).join('')}</section><form class="chat-form" id="chatForm"><input id="message" maxlength="4000" placeholder="Написать сообщение…" autocomplete="off"><button class="send" id="send" aria-label="Отправить">➜</button></form>`;document.getElementById('chatForm').onsubmit=sendMessage;scrollLog()}
+function editMemory(){root.innerHTML=`<main><button class="back" onclick="renderChat()">‹  Назад в чат</button><h1 style="font-size:24px;margin:4px 0 5px">Память персонажа</h1><div class="sub">Запиши важные факты, события и предпочтения. Персонаж будет учитывать их в этом чате.</div><form id="memoryForm"><textarea id="memoryText" class="field fieldarea" maxlength="1200" style="min-height:190px;margin-top:18px" placeholder="Например: меня зовут Саша; мы познакомились в университете; я не люблю, когда меня называют Сашенькой.">${esc(chatMemory)}</textarea><div class="sub" style="margin:8px 0 18px">Только для этого чата · до 1200 символов</div><button class="primary" id="saveMemory">Сохранить память</button></form></main>`;document.getElementById('memoryForm').onsubmit=saveMemory}
+async function saveMemory(e){e.preventDefault();const button=document.getElementById('saveMemory');button.disabled=true;try{const d=await api('/api/chat/'+encodeURIComponent(active.id)+'/memory','PATCH',{memory:document.getElementById('memoryText').value.trim()});chatMemory=d.memory||'';renderChat()}catch(error){showError(error);button.disabled=false}}
 function addBubble(role,text){const log=document.getElementById('log');if(!log)return;const b=document.createElement('div');b.className='bubble '+(role==='user'?'user':'assistant');b.textContent=text;log.appendChild(b);scrollLog()}
 function scrollLog(){const l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight}
 async function sendMessage(e){e.preventDefault();if(busy)return;const input=document.getElementById('message');const text=input.value.trim();if(!text)return;input.value='';busy=true;document.getElementById('send').disabled=true;addBubble('user',text);const loading=document.createElement('div');loading.className='spinner';loading.textContent=active.name+' пишет…';document.getElementById('log').appendChild(loading);scrollLog();try{const d=await api('/api/chat/'+encodeURIComponent(active.id),'POST',{text});loading.remove();addBubble('assistant',d.answer);history=d.messages}catch(err){loading.remove();showError(err)}finally{busy=false;const b=document.getElementById('send');if(b)b.disabled=false}}
@@ -233,12 +235,35 @@ class CharacterStore:
         key = f"{user_id}:{character_id}"
         with self.lock:
             chats = self._read(self.chats_path, {})
-            chats[key] = {
+            chat = chats.get(key, {})
+            chat.update({
                 "user_id": user_id,
                 "character_id": character_id,
                 "messages": messages[-40:],
                 "updated_at": _utc_now(),
-            }
+            })
+            chats[key] = chat
+            self._write(self.chats_path, chats)
+
+    def chat_memory(self, user_id: int, character_id: str) -> str:
+        key = f"{user_id}:{character_id}"
+        with self.lock:
+            chats = self._read(self.chats_path, {})
+            chat = chats.get(key, {})
+            return str(chat.get("memory", ""))
+
+    def save_chat_memory(self, user_id: int, character_id: str, memory: str) -> None:
+        key = f"{user_id}:{character_id}"
+        with self.lock:
+            chats = self._read(self.chats_path, {})
+            chat = chats.get(key, {})
+            chat.update({
+                "user_id": user_id,
+                "character_id": character_id,
+                "memory": memory,
+                "updated_at": _utc_now(),
+            })
+            chats[key] = chat
             self._write(self.chats_path, chats)
 
     def list_chats(self, user_id: int) -> list[dict]:
@@ -286,11 +311,18 @@ class CharacterAdapter:
     def register_commands(self) -> None:
         self.dp.message.register(self.open_app_command, Command("characters"))
         self.dp.message.register(self.show_feedback_command, Command("feedbacks"))
+        self.dp.message.register(
+            self.show_feedback_command,
+            lambda message: (message.text or "").strip().casefold() in {
+                "feedbacks", "feedback", "отзывы", "мои отзывы",
+            },
+        )
 
     async def show_feedback_command(self, message: types.Message) -> None:
         if message.chat.type != ChatType.PRIVATE:
             await message.answer("Отзывы можно просматривать только в личном чате с ботом.")
             return
+        print(f"Feedback review requested in private chat {message.chat.id}.")
         parts = (message.text or "").split()
         try:
             page = max(1, int(parts[1])) if len(parts) > 1 else 1
@@ -330,6 +362,7 @@ class CharacterAdapter:
         app.router.add_route("PATCH", "/api/character/{character_id}", self.visibility)
         app.router.add_get("/api/chat/{character_id}", self.get_chat)
         app.router.add_post("/api/chat/{character_id}", self.send_chat)
+        app.router.add_route("PATCH", "/api/chat/{character_id}/memory", self.update_chat_memory)
         app.router.add_get("/feedback-ui.js", self.feedback_ui_script)
         app.router.add_post("/api/feedback", self.submit_feedback)
 
@@ -500,12 +533,29 @@ class CharacterAdapter:
             if not character:
                 return self._response({"error": "Персонаж не найден или скрыт."}, 404)
             messages = self.store.chat_history(user_id, character["id"])
+            memory = self.store.chat_memory(user_id, character["id"])
             if not messages and character.get("greeting"):
                 messages = [{"role": "assistant", "content": character["greeting"]}]
-            return self._response({"character": self.store._public_character(character), "messages": messages})
+            return self._response({"character": self.store._public_character(character), "messages": messages, "memory": memory})
         except (OSError, json.JSONDecodeError) as error:
             print(f"Ошибка загрузки диалога с персонажем: {error}")
             return self._response({"error": "Не удалось загрузить диалог."}, 500)
+
+    async def update_chat_memory(self, request: web.Request) -> web.Response:
+        user_id = self._user_id(request)
+        data = await self._json(request)
+        memory = str(data.get("memory", "")).strip()
+        if len(memory) > 1200:
+            return self._response({"error": "Память должна быть не длиннее 1200 символов."}, 400)
+        try:
+            character = self.store.get_character(request.match_info["character_id"], user_id)
+            if not character:
+                return self._response({"error": "Персонаж не найден или скрыт."}, 404)
+            self.store.save_chat_memory(user_id, character["id"], memory)
+            return self._response({"ok": True, "memory": memory})
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"Ошибка сохранения памяти чата: {error}")
+            return self._response({"error": "Не удалось сохранить память. Попробуй ещё раз."}, 500)
 
     async def send_chat(self, request: web.Request) -> web.Response:
         user_id = self._user_id(request)
@@ -524,7 +574,16 @@ class CharacterAdapter:
                 if not history and character.get("greeting"):
                     history.append({"role": "assistant", "content": character["greeting"]})
                 prompt_history = history[-18:] + [{"role": "user", "content": text}]
-                answer = await self.generate_reply(character, prompt_history)
+                memory = self.store.chat_memory(user_id, character_id)
+                reply_character = dict(character)
+                if memory:
+                    reply_character["definition"] = (
+                        str(character.get("definition", ""))
+                        + "\n\nПостоянная память этого чата. Учитывай её как ранее установленные факты, "
+                        "если пользователь не сообщил, что они изменились:\n"
+                        + memory
+                    )
+                answer = await self.generate_reply(reply_character, prompt_history)
                 if not answer:
                     return self._response({"error": "Персонаж не смог ответить. Попробуй ещё раз."}, 502)
                 saved = history + [
