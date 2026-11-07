@@ -19,6 +19,7 @@
 """
 
 import asyncio
+import copy
 import json
 import os
 import random
@@ -26,6 +27,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from aiohttp import web
@@ -48,6 +50,7 @@ from persona_adapter import (
 )
 from character_adapter import CharacterAdapter
 from relationship_adapter import RelationshipAdapter, parse_relationship_marker
+from activity_adapter import AliceActivity
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -102,7 +105,6 @@ BOT_CHAIN_LIMIT = int(_env_number("BOT_CHAIN_LIMIT", 3))
 BOT_REPLY_COOLDOWN = _env_number("BOT_REPLY_COOLDOWN", 8.0)
 WEB_APP_BASE_URL = _env("WEB_APP_URL") or _env("RENDER_EXTERNAL_URL")
 CHARACTER_DATA_DIR = _env("CHARACTER_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
-
 ALICE_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 NEUROHAM_TRIGGER = re.compile(r"^\s*нейрохам\b", re.IGNORECASE)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -130,6 +132,7 @@ class Memory:
         self.chats: Dict[str, List[dict]] = {}
         self.users: Dict[str, dict] = {}
         self.last_seen: Dict[str, float] = {}
+        self.activity: Dict[str, Any] = {}
         self._load()
         self._start_autosave()
 
@@ -280,6 +283,40 @@ class Memory:
         with self.lock:
             return dict(self.users)
 
+    def get_activity_state(self, user_id: int) -> Dict[str, Any]:
+        with self.lock:
+            user_states = self.activity.get("users", {})
+            if not isinstance(user_states, dict):
+                return {}
+            state = user_states.get(str(user_id), {})
+            return copy.deepcopy(state) if isinstance(state, dict) else {}
+
+    def update_activity_state(self, user_id: int, updates: dict):
+        with self.lock:
+            user_states = self.activity.setdefault("users", {})
+            if not isinstance(user_states, dict):
+                user_states = self.activity["users"] = {}
+            state = user_states.setdefault(str(user_id), {})
+            if not isinstance(state, dict):
+                state = user_states[str(user_id)] = {}
+            state.update(updates)
+            self._dirty = True
+        self.save(force=True)
+
+    def get_activity_users(self) -> List[int]:
+        with self.lock:
+            user_states = self.activity.get("users", {})
+            if not isinstance(user_states, dict):
+                return []
+            result = []
+            for user_id, state in user_states.items():
+                if isinstance(state, dict) and state.get("enrolled"):
+                    try:
+                        result.append(int(user_id))
+                    except (TypeError, ValueError):
+                        continue
+            return result
+
     # --- сохранение / загрузка ---
     def _load(self):
         if not os.path.exists(self.filepath):
@@ -291,6 +328,8 @@ class Memory:
             self.chats = data.get("chats", {})
             self.users = data.get("users", {})
             self.last_seen = data.get("last_seen", {})
+            loaded_activity = data.get("activity", {})
+            self.activity = loaded_activity if isinstance(loaded_activity, dict) else {}
             print(f"📂 Память загружена: {len(self.chats)} чатов, {len(self.users)} юзеров")
         except (json.JSONDecodeError, OSError) as error:
             print(f"⚠️ Ошибка загрузки памяти: {error}. Начинаем с чистой.")
@@ -309,6 +348,7 @@ class Memory:
                 "chats": self.chats,
                 "users": self.users,
                 "last_seen": self.last_seen,
+                "activity": self.activity,
                 "saved_at": time.time(),
             }
             try:
@@ -517,6 +557,15 @@ relationships = RelationshipAdapter(
     filepath=os.path.join(os.path.dirname(os.path.abspath(__file__)), "relationships.json"),
 )
 relationships.register_commands()
+activity = AliceActivity(
+    bot=bot,
+    memory=memory,
+    ask_groq=ask_groq,
+    build_prompt=build_system_prompt,
+    clean_reply=lambda raw: clean_answer(parse_relationship_marker(raw or "")[0]),
+    get_custom_style=memory.get_custom_style,
+    get_facts=memory.get_user_facts,
+)
 
 
 # ============================================================
@@ -565,11 +614,20 @@ async def start_command(message: types.Message):
             "Рада, что ты написала. Можно просто болтать, делиться чем угодно "
             "или спрашивать — я рядом."
         )
+    activity_notice = (
+        "\n\nАлиса может сама начинать разговор в личном чате 30–50 раз в день. "
+        "Остановить сообщения: /pause_activity."
+        if message.chat.type == ChatType.PRIVATE
+        else ""
+    )
     await message.answer(
         f"{greeting}\n\nНапиши /mode, чтобы выбрать персонажа, "
-        "а /settings — чтобы настроить стиль под себя.",
+        "а /settings — чтобы настроить стиль под себя."
+        f"{activity_notice}",
         reply_markup=characters.keyboard() if message.chat.type == ChatType.PRIVATE else None,
     )
+    if message.chat.type == ChatType.PRIVATE and message.from_user:
+        activity.register_user(message.from_user.id)
 
 
 @dp.message(Command("help"))
@@ -582,6 +640,8 @@ async def help_command(message: types.Message):
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
         "• /mode — выбрать режим Алисы или Злого Нейрохама\n"
         "• /settings — открыть личную настройку стиля\n\n"
+        "• /activity — статус инициатив Алисы\n"
+        "• /pause_activity и /resume_activity — поставить инициативы на паузу или включить снова (в личном чате)\n\n"
         "• /remember факт — сохранить факт в общей памяти обоих режимов\n"
         "• /memory — посмотреть сохранённые факты\n"
         "• /forget номер — удалить факт; /forget all — очистить память\n\n"
@@ -616,6 +676,46 @@ async def settings_command(message: types.Message):
         f"Инструкции можно задать сообщением до {MAX_CUSTOM_STYLE_LENGTH} символов.",
         reply_markup=mode_keyboard(include_custom=True),
     )
+
+
+@dp.message(Command("activity"))
+async def activity_status_command(message: types.Message):
+    if message.chat.type != ChatType.PRIVATE or not message.from_user:
+        await message.answer("Эта команда работает в личном чате со мной.")
+        return
+    activity.register_user(message.from_user.id)
+    status = activity.status(message.from_user.id)
+    next_at = status["next_at"]
+    next_text = (
+        datetime.fromtimestamp(next_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if next_at
+        else "не запланирована"
+    )
+    state_text = "включена" if status["enabled"] else "на паузе"
+    await message.answer(
+        f"Активность Алисы: {state_text}.\n"
+        f"Инициатив сегодня: {status['sent']} из {status['target']} (цель 30–50).\n"
+        f"Следующая: {next_text}."
+    )
+
+
+@dp.message(Command("pause_activity"))
+async def pause_activity_command(message: types.Message):
+    if message.chat.type != ChatType.PRIVATE or not message.from_user:
+        await message.answer("Эта команда работает в личном чате со мной.")
+        return
+    await activity.pause(message.from_user.id)
+    await message.answer("Самостоятельную активность Алисы приостановила.")
+
+
+@dp.message(Command("resume_activity"))
+async def resume_activity_command(message: types.Message):
+    if message.chat.type != ChatType.PRIVATE or not message.from_user:
+        await message.answer("Эта команда работает в личном чате со мной.")
+        return
+    activity.register_user(message.from_user.id)
+    await activity.resume(message.from_user.id)
+    await message.answer("Самостоятельную активность Алисы возобновила.")
 
 
 @dp.message(Command("cancel"))
@@ -1035,6 +1135,7 @@ async def main():
     try:
         await init_bot_identity()
         await resolve_model()
+        await activity.start()
         try:
             # drop_pending_updates: не отвечаем пачкой на накопленные за простой сообщения
             await bot.delete_webhook(drop_pending_updates=True)
@@ -1042,6 +1143,7 @@ async def main():
             print(f"delete_webhook: {type(error).__name__}")
         await run_polling()
     finally:
+        await activity.stop()
         await runner.cleanup()
         memory.shutdown()
         await bot.session.close()
