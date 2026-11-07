@@ -14,7 +14,13 @@ from groq import APIConnectionError, APIStatusError
 class AliceActivity:
     MIN_DAILY_MESSAGES = 30
     MAX_DAILY_MESSAGES = 50
-    MIN_INTERVAL_SECONDS = 15 * 60
+    SCHEDULE_VERSION = 2
+    FIRST_MESSAGE_MIN_SECONDS = 5
+    FIRST_MESSAGE_MAX_SECONDS = 10
+    MIN_INTERVAL_SECONDS = 30
+    MAX_INTERVAL_SECONDS = 90
+    RETRY_MIN_SECONDS = 60
+    RETRY_MAX_SECONDS = 120
 
     def __init__(
         self,
@@ -58,6 +64,21 @@ class AliceActivity:
                 next_at=None,
             )
             self._save(user_id, date=today, sent=0, target=state["target"], next_at=None)
+        try:
+            schedule_version = int(state.get("schedule_version", 0))
+        except (TypeError, ValueError):
+            schedule_version = 0
+        if schedule_version < self.SCHEDULE_VERSION:
+            next_at = None
+            if state.get("enabled", True) and int(state.get("sent", 0)) < int(
+                state.get("target", self.MIN_DAILY_MESSAGES)
+            ):
+                next_at = time.time() + random.randint(
+                    self.FIRST_MESSAGE_MIN_SECONDS, self.FIRST_MESSAGE_MAX_SECONDS
+                )
+            self._save(user_id, schedule_version=self.SCHEDULE_VERSION, next_at=next_at)
+            state["schedule_version"] = self.SCHEDULE_VERSION
+            state["next_at"] = next_at
         return state
 
     def _ensure_task(self, user_id: int) -> None:
@@ -83,7 +104,12 @@ class AliceActivity:
             state = self._ensure_day(user_id)
             if state.get("enabled", True):
                 if not state.get("next_at") or float(state.get("next_at", 0)) <= time.time():
-                    self._save(user_id, next_at=time.time() + random.randint(300, 900))
+                    self._save(
+                        user_id,
+                        next_at=time.time() + random.randint(
+                            self.FIRST_MESSAGE_MIN_SECONDS, self.FIRST_MESSAGE_MAX_SECONDS
+                        ),
+                    )
                 self._ensure_task(user_id)
         print(f"Планировщик активности Алисы запущен для {len(users)} личных чатов")
 
@@ -97,7 +123,7 @@ class AliceActivity:
         self.tasks.clear()
 
     def _schedule(self, user_id: int, delay: float):
-        self._save(user_id, next_at=time.time() + max(60, delay))
+        self._save(user_id, next_at=time.time() + max(1, delay))
 
     def status(self, user_id: int) -> Dict[str, Any]:
         state = self._ensure_day(user_id)
@@ -115,7 +141,14 @@ class AliceActivity:
     async def resume(self, user_id: int):
         async with self._lock:
             self._ensure_day(user_id)
-            self._save(user_id, enrolled=True, enabled=True, next_at=time.time() + random.randint(180, 600))
+            self._save(
+                user_id,
+                enrolled=True,
+                enabled=True,
+                next_at=time.time() + random.randint(
+                    self.FIRST_MESSAGE_MIN_SECONDS, self.FIRST_MESSAGE_MAX_SECONDS
+                ),
+            )
             self._ensure_task(user_id)
 
     async def _run(self, user_id: int):
@@ -140,7 +173,10 @@ class AliceActivity:
             next_at = state.get("next_at")
             now = time.time()
             if not next_at:
-                self._schedule(user_id, random.randint(300, 900))
+                self._schedule(
+                    user_id,
+                    random.randint(self.FIRST_MESSAGE_MIN_SECONDS, self.FIRST_MESSAGE_MAX_SECONDS),
+                )
                 continue
             remaining = next_at - now
             if remaining > 0:
@@ -172,7 +208,9 @@ class AliceActivity:
                 print(f"Самостоятельная активность остановлена: чат {user_id} больше недоступен")
             except (APIConnectionError, APIStatusError, AiogramError) as error:
                 self._save(user_id, pending_hash=None)
-                self._schedule(user_id, random.randint(20 * 60, 45 * 60))
+                self._schedule(
+                    user_id, random.randint(self.RETRY_MIN_SECONDS, self.RETRY_MAX_SECONDS)
+                )
                 print(f"Временный сбой инициативы Алисы для чата {user_id}: {type(error).__name__}")
             except Exception as error:
                 current = self._state(user_id)
@@ -181,17 +219,17 @@ class AliceActivity:
                     if int(current.get("sent", 0)) > sent:
                         self._schedule(user_id, self._next_interval(sent + 1, target))
                     else:
-                        self._schedule(user_id, random.randint(20 * 60, 45 * 60))
+                        self._schedule(
+                            user_id, random.randint(self.RETRY_MIN_SECONDS, self.RETRY_MAX_SECONDS)
+                        )
                 else:
-                    self._schedule(user_id, random.randint(20 * 60, 45 * 60))
+                    self._schedule(
+                        user_id, random.randint(self.RETRY_MIN_SECONDS, self.RETRY_MAX_SECONDS)
+                    )
                 print(f"Не удалось создать инициативу Алисы для чата {user_id}: {type(error).__name__}")
 
     def _next_interval(self, sent: int, target: int) -> float:
-        now = datetime.now(timezone.utc)
-        end = datetime.combine(now.date(), datetime.min.time(), timezone.utc).timestamp() + 86400
-        remaining_slots = max(1, target - sent)
-        ideal = max(self.MIN_INTERVAL_SECONDS, (end - time.time()) / remaining_slots)
-        return ideal * random.uniform(0.72, 0.98)
+        return random.randint(self.MIN_INTERVAL_SECONDS, self.MAX_INTERVAL_SECONDS)
 
     async def _generate(self, user_id: int) -> str:
         history = self.memory.get_history(user_id)[-20:]

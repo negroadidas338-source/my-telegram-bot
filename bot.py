@@ -686,16 +686,16 @@ async def activity_status_command(message: types.Message):
     activity.register_user(message.from_user.id)
     status = activity.status(message.from_user.id)
     next_at = status["next_at"]
-    next_text = (
-        datetime.fromtimestamp(next_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        if next_at
-        else "не запланирована"
-    )
+    if next_at:
+        remaining = max(0, int(next_at - time.time()))
+        next_text = f"примерно через {remaining} сек." if remaining < 60 else f"примерно через {remaining // 60} мин."
+    else:
+        next_text = "не запланирована"
     state_text = "включена" if status["enabled"] else "на паузе"
     await message.answer(
         f"Активность Алисы: {state_text}.\n"
         f"Инициатив сегодня: {status['sent']} из {status['target']} (цель 30–50).\n"
-        f"Следующая: {next_text}."
+        f"Следующая инициатива: {next_text}."
     )
 
 
