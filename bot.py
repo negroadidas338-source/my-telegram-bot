@@ -15,6 +15,7 @@
   MEMORY_FILE            — путь к файлу памяти (по умолчанию memory.json рядом с bot.py)
   WEB_APP_URL            — HTTPS-адрес Mini App (на Render берётся из RENDER_EXTERNAL_URL)
   CHARACTER_DATA_DIR     — каталог данных персонажей (по умолчанию рядом с bot.py)
+  OWNER_USER_ID          — Telegram ID владельца защищённой панели (необязательно)
   PORT                   — порт веб-сервера (Render задаёт сам)
 """
 
@@ -51,6 +52,8 @@ from persona_adapter import (
 from character_adapter import CharacterAdapter
 from relationship_adapter import RelationshipAdapter, parse_relationship_marker
 from activity_adapter import AliceActivity
+from dashboard_adapter import ConsoleLogBuffer, DashboardAdapter
+from diagnostics import load_test_summary, run_health_check
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -105,6 +108,12 @@ BOT_CHAIN_LIMIT = int(_env_number("BOT_CHAIN_LIMIT", 3))
 BOT_REPLY_COOLDOWN = _env_number("BOT_REPLY_COOLDOWN", 8.0)
 WEB_APP_BASE_URL = _env("WEB_APP_URL") or _env("RENDER_EXTERNAL_URL")
 CHARACTER_DATA_DIR = _env("CHARACTER_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+try:
+    OWNER_USER_ID = int(_env("OWNER_USER_ID")) if _env("OWNER_USER_ID") else None
+    if OWNER_USER_ID is not None and OWNER_USER_ID <= 0:
+        OWNER_USER_ID = None
+except ValueError:
+    OWNER_USER_ID = None
 ALICE_TRIGGER = re.compile(r"^\s*алиса\b", re.IGNORECASE)
 NEUROHAM_TRIGGER = re.compile(r"^\s*нейрохам\b", re.IGNORECASE)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -133,6 +142,7 @@ class Memory:
         self.users: Dict[str, dict] = {}
         self.last_seen: Dict[str, float] = {}
         self.activity: Dict[str, Any] = {}
+        self.load_error = False
         self._load()
         self._start_autosave()
 
@@ -283,6 +293,16 @@ class Memory:
         with self.lock:
             return dict(self.users)
 
+    def stats(self) -> dict:
+        with self.lock:
+            return {
+                "chats": len(self.chats),
+                "users": len(self.users),
+                "messages": sum(len(history) for history in self.chats.values()),
+                "healthy": not self.load_error,
+                "file_exists": os.path.isfile(self.filepath),
+            }
+
     def get_activity_state(self, user_id: int) -> Dict[str, Any]:
         with self.lock:
             user_states = self.activity.get("users", {})
@@ -332,6 +352,7 @@ class Memory:
             self.activity = loaded_activity if isinstance(loaded_activity, dict) else {}
             print(f"📂 Память загружена: {len(self.chats)} чатов, {len(self.users)} юзеров")
         except (json.JSONDecodeError, OSError) as error:
+            self.load_error = True
             print(f"⚠️ Ошибка загрузки памяти: {error}. Начинаем с чистой.")
             self.chats, self.users, self.last_seen = {}, {}, {}
 
@@ -391,6 +412,9 @@ groq_cooldown_until = 0.0
 
 active_model = MODEL_CANDIDATES[0]
 model_dead_until: Dict[str, float] = {}  # модель -> время, до которого её не трогаем (после 404)
+GROQ_HEALTH = {"state": "unknown", "checked_at": None, "last_success": None, "last_error": None}
+BOT_STARTED_AT = time.monotonic()
+POLLING_STATE = "starting"
 
 chat_locks: Dict[int, asyncio.Lock] = {}   # один запрос за раз на чат
 bot_chain: Dict[int, int] = {}              # сколько раз подряд ответили боту без человека
@@ -454,13 +478,16 @@ async def resolve_model():
         listing = await ai.models.list()
         available = {m.id for m in listing.data}
     except Exception as error:
+        GROQ_HEALTH.update(state="unknown", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=type(error).__name__)
         print(f"Не удалось получить список моделей Groq ({type(error).__name__}), беру {active_model}")
         return
     for model in MODEL_CANDIDATES:
         if model in available:
             active_model = model
+            GROQ_HEALTH.update(state="available", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=None)
             print(f"Модель Groq: {active_model}")
             return
+    GROQ_HEALTH.update(state="error", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error="configured model unavailable")
     print(
         "⚠️ Ни одна из моделей-кандидатов не найдена у Groq. "
         f"Кандидаты: {MODEL_CANDIDATES}. Доступные: {sorted(available)}"
@@ -511,12 +538,18 @@ async def ask_groq(messages: List[dict]):
                 model_dead_until[model] = time.monotonic() + 600
                 last_error = error
                 continue
+            GROQ_HEALTH.update(state="error", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=f"HTTP {error.status_code}")
+            raise
+        except APIConnectionError as error:
+            GROQ_HEALTH.update(state="unknown", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=type(error).__name__)
             raise
         if model != active_model:
             print(f"Переключился на модель {model}")
             active_model = model
+        GROQ_HEALTH.update(state="available", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_success=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=None)
         return response
     assert last_error is not None
+    GROQ_HEALTH.update(state="error", checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=f"HTTP {last_error.status_code}")
     raise last_error
 
 
@@ -557,6 +590,70 @@ relationships = RelationshipAdapter(
     filepath=os.path.join(os.path.dirname(os.path.abspath(__file__)), "relationships.json"),
 )
 relationships.register_commands()
+
+dashboard_logs = ConsoleLogBuffer(secrets=(TOKEN, GROQ_API_KEY))
+
+
+def _uptime_text() -> str:
+    seconds = max(0, int(time.monotonic() - BOT_STARTED_AT))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes = seconds // 60
+    return f"{days} д {hours} ч {minutes} мин" if days else f"{hours} ч {minutes} мин"
+
+
+def _backup_names() -> list[str]:
+    backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
+    try:
+        files = [name for name in os.listdir(backup_dir) if name.startswith("alice_backup_") and name.endswith(".zip")]
+    except OSError:
+        return []
+    return sorted(files, reverse=True)[:5]
+
+
+async def _dashboard_status(user_id: int) -> dict:
+    memory_stats = memory.stats()
+    tests = load_test_summary(os.path.join(os.path.dirname(__file__), "reports", "test_results.json"))
+    groq_state = GROQ_HEALTH["state"]
+    return {
+        "bot": {
+            "state": "ok" if POLLING_STATE == "online" else "error" if POLLING_STATE == "error" else "warning",
+            "label": "Онлайн" if POLLING_STATE == "online" else "Ошибка" if POLLING_STATE == "error" else "Запускается",
+        },
+        "groq": {
+            "state": "ok" if groq_state == "available" else "error" if groq_state == "error" else "warning",
+            "label": "Доступен" if groq_state == "available" else "Ошибка" if groq_state == "error" else "Не проверен",
+            "model": active_model,
+            "checked_at": GROQ_HEALTH["checked_at"],
+        },
+        "tests": tests,
+        "memory": {key: memory_stats[key] for key in ("chats", "users", "messages")},
+        "uptime": _uptime_text(),
+        "backups": _backup_names(),
+    }
+
+
+async def _dashboard_health() -> dict:
+    return run_health_check(
+        os.path.dirname(os.path.abspath(__file__)),
+        MEMORY_FILE,
+        bot_configured=bool(TOKEN),
+        groq_configured=bool(GROQ_API_KEY),
+        telegram_state="online" if POLLING_STATE == "online" else "error" if POLLING_STATE == "error" else "unknown",
+        groq_state=GROQ_HEALTH["state"],
+    )
+
+
+dashboard = DashboardAdapter(
+    project_root=os.path.dirname(os.path.abspath(__file__)),
+    owner_id=OWNER_USER_ID,
+    auth_user_id=characters._user_id,
+    status_provider=_dashboard_status,
+    health_provider=_dashboard_health,
+    log_buffer=dashboard_logs,
+    memory_file=MEMORY_FILE,
+    character_data_dir=CHARACTER_DATA_DIR,
+)
 activity = AliceActivity(
     bot=bot,
     memory=memory,
@@ -640,6 +737,8 @@ async def help_command(message: types.Message):
         "• /reset — забыть наш текущий диалог (история очистится)\n\n"
         "• /mode — выбрать режим Алисы или Злого Нейрохама\n"
         "• /settings — открыть личную настройку стиля\n\n"
+        "• /status — краткое состояние бота, Groq, памяти и последних тестов\n"
+        "• /panel — защищённая панель владельца (только личный чат)\n\n"
         "• /activity — статус инициатив Алисы\n"
         "• /pause_activity и /resume_activity — поставить инициативы на паузу или включить снова (в личном чате)\n\n"
         "• /remember факт — сохранить факт в общей памяти обоих режимов\n"
@@ -648,6 +747,56 @@ async def help_command(message: types.Message):
         "• /characters — открыть каталог и создать своего персонажа\n\n"
         "В группе я отвечаю на обращение по имени выбранного режима, "
         "ответ на моё сообщение или упоминание. Выбор режима личный для каждого участника."
+    )
+
+
+@dp.message(Command("status"))
+async def status_command(message: types.Message):
+    if message.chat.type != ChatType.PRIVATE:
+        await message.answer("Отчёт о состоянии доступен в личном чате со мной: отправь /status.")
+        return
+    snapshot = await _dashboard_status(message.from_user.id if message.from_user else 0)
+    health_state = (await _dashboard_health())["overall"]
+    tests = snapshot["tests"]
+    test_line = (
+        f"Тесты: {tests['passed']}/{tests['total']} пройдено, "
+        f"провалов {tests['failed']}, ошибок {tests['errors']}"
+        if tests
+        else "Тесты: сохранённого результата пока нет"
+    )
+    memory_stats = snapshot["memory"]
+    await message.answer(
+        "📊 Состояние Алисы\n"
+        f"🤖 Бот: {snapshot['bot']['label']}\n"
+        f"🧠 Groq: {snapshot['groq']['label']} · {snapshot['groq']['model']}\n"
+        f"🩺 Проверка здоровья: {health_state.upper()}\n"
+        f"🧪 {test_line}\n"
+        f"💾 Память: {memory_stats['messages']} сообщений, {memory_stats['chats']} чатов\n"
+        f"⏱ Работает: {snapshot['uptime']}"
+    )
+
+
+@dp.message(Command("panel"))
+async def panel_command(message: types.Message):
+    if message.chat.type != ChatType.PRIVATE or not message.from_user:
+        await message.answer("Защищённая панель открывается только в личном чате с владельцем.")
+        return
+    if OWNER_USER_ID is None:
+        await message.answer("Панель пока не настроена: добавь OWNER_USER_ID в переменные окружения сервера.")
+        return
+    if message.from_user.id != OWNER_USER_ID:
+        await message.answer("Доступ к панели разрешён только владельцу бота.")
+        return
+    if not WEB_APP_BASE_URL.startswith("https://"):
+        await message.answer("Панель требует публичный HTTPS-адрес сервера.")
+        return
+    button = types.InlineKeyboardButton(
+        text="💜 Открыть панель Алисы",
+        web_app=types.WebAppInfo(url=f"{WEB_APP_BASE_URL.rstrip('/')}/panel"),
+    )
+    await message.answer(
+        "Панель доступна только в Telegram и проверяет владельца через подпись Mini App.",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[[button]]),
     )
 
 
@@ -1077,6 +1226,7 @@ async def start_web() -> web.AppRunner:
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     characters.register_routes(app)
+    dashboard.register_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
     try:
@@ -1109,20 +1259,25 @@ async def run_polling():
     """Polling с автоперезапуском. aiogram сам повторяет запрос при TelegramConflictError
     (с нарастающей паузой); внешний цикл страхует от любых неожиданных падений."""
     backoff_config = BackoffConfig(min_delay=2.0, max_delay=30.0, factor=1.6, jitter=0.2)
+    global POLLING_STATE
     delay = 5.0
     while True:
         started = time.monotonic()
         try:
+            POLLING_STATE = "online"
             await dp.start_polling(
                 bot,
                 allowed_updates=dp.resolve_used_update_types(),
                 backoff_config=backoff_config,
                 close_bot_session=False,
             )
+            POLLING_STATE = "stopped"
             return  # штатная остановка (SIGTERM/SIGINT)
         except asyncio.CancelledError:
+            POLLING_STATE = "stopping"
             raise
         except Exception as error:
+            POLLING_STATE = "error"
             print(f"Polling упал: {type(error).__name__}: {error}")
         delay = 5.0 if time.monotonic() - started > 120 else min(delay * 2, 60.0)
         print(f"Перезапуск polling через {delay:.0f} сек.")
@@ -1130,6 +1285,10 @@ async def run_polling():
 
 
 async def main():
+    global BOT_STARTED_AT, POLLING_STATE
+    BOT_STARTED_AT = time.monotonic()
+    POLLING_STATE = "starting"
+    dashboard_logs.install()
     print("Алиса запускается...")
     runner = await start_web()  # порт открываем первым, чтобы Render не убил деплой по таймауту
     try:
@@ -1143,6 +1302,7 @@ async def main():
             print(f"delete_webhook: {type(error).__name__}")
         await run_polling()
     finally:
+        POLLING_STATE = "stopped"
         await activity.stop()
         await runner.cleanup()
         memory.shutdown()
