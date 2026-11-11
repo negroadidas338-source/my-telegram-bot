@@ -180,9 +180,15 @@ class DashboardAdapter:
     async def tests(self, request: web.Request) -> web.Response:
         self._authorize(request)
         runner = self.project_root / "tests" / "run_tests.py"
-        if not runner.is_file():
+        test_files = list((self.project_root / "tests").glob("test_*.py"))
+        if runner.is_file():
+            command = [sys.executable, "-B", str(runner)]
+        elif test_files:
+            # Older/incomplete GitHub uploads may omit the wrapper but include the tests.
+            command = [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-t", "."]
+        else:
             raise web.HTTPServiceUnavailable(
-                text=json.dumps({"error": "Локальный запуск тестов не настроен."}, ensure_ascii=False),
+                text=json.dumps({"error": "Тесты не загружены на сервер. Добавь папку tests из проекта."}, ensure_ascii=False),
                 content_type="application/json",
             )
         env = os.environ.copy()
@@ -190,9 +196,7 @@ class DashboardAdapter:
         env.pop("GROQ_API_KEY", None)
         try:
             process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-B",
-                str(runner),
+                *command,
                 cwd=str(self.project_root),
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
@@ -210,6 +214,24 @@ class DashboardAdapter:
         for line in output_text.splitlines()[-40:]:
             self.log_buffer.append(line)
         result = load_test_summary(self.project_root / "reports" / "test_results.json")
+        if not runner.is_file():
+            ran = re.search(r"Ran (\d+) tests? in ", output_text)
+            if ran:
+                counts = {key: 0 for key in ("failed", "errors", "skipped")}
+                test_summary = re.search(r"(?:FAILED|OK) \(([^)]*)\)", output_text)
+                if test_summary:
+                    for key, value in re.findall(r"(failures|errors|skipped)=(\d+)", test_summary.group(1)):
+                        counts[{"failures": "failed"}.get(key, key)] = int(value)
+                result = {
+                    "total": int(ran.group(1)),
+                    **counts,
+                    "passed": max(0, int(ran.group(1)) - sum(counts.values())),
+                    "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                result["result"] = "passed" if process.returncode == 0 else "failed"
+                report = self.project_root / "reports" / "test_results.json"
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         if not result:
             raise web.HTTPInternalServerError(
                 text=json.dumps({"error": "Тесты завершились без сохранённого итогового отчёта."}, ensure_ascii=False),
