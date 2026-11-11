@@ -54,6 +54,7 @@ from relationship_adapter import RelationshipAdapter, parse_relationship_marker
 from activity_adapter import AliceActivity
 from dashboard_adapter import ConsoleLogBuffer, DashboardAdapter
 from diagnostics import load_test_summary, run_health_check
+from tests_adapter import TestsAdapter
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -590,6 +591,13 @@ relationships = RelationshipAdapter(
     filepath=os.path.join(os.path.dirname(os.path.abspath(__file__)), "relationships.json"),
 )
 relationships.register_commands()
+
+tests = TestsAdapter(
+    dispatcher=dp,
+    project_root=os.path.dirname(os.path.abspath(__file__)),
+    owner_id=OWNER_USER_ID,
+)
+tests.register_commands()
 
 dashboard_logs = ConsoleLogBuffer(secrets=(TOKEN, GROQ_API_KEY))
 
